@@ -1,7 +1,7 @@
 ---
 title: "CommunityLab system architecture and service topology"
 sidebarTitle: "Architecture"
-description: "Understand the six-service Docker Compose stack, the LangGraph processing graph, PostgreSQL schema, and the data flow from message ingestion to OCI Storage."
+description: "Explore the six-service Compose stack, LangGraph pipeline graph, PostgreSQL data model, and data flow from Discord message ingestion to content assets."
 ---
 
 CommunityLab is organized as a monorepo with six top-level module directories — `backend/`, `frontend/`, `pipelines/`, `worker/`, `infrastructure/`, and `proxy/` — plus `data/` for sample inputs and `docs/` for internal documentation. The runtime stack is declared in a single `docker-compose.yml` at the repository root and assembles six Docker services: an Nginx reverse proxy, a Next.js frontend, a FastAPI backend, an async Python worker, a one-shot schema-init job, and a PostgreSQL database. All inter-service communication is constrained to isolated Docker bridge networks, with only the proxy exposing a host port.
@@ -29,28 +29,29 @@ All services except `proxy` use `restart: unless-stopped` and structured JSON lo
 
 The Compose stack defines three Docker bridge networks that enforce strict isolation between service tiers.
 
-```
+```text
  HOST
   │
   └─ 8080 ──► [ proxy ]
                   │   \
-   ╔══════════════╪═══╪══════════════╗
-   ║  frontend    │   │              ║
-   ║  (internal)  │   │              ║
-   ║          [ web ] [ api ]        ║
-   ╚══════════════╪═══╪══════════════╝
-                  │   │
-   ╔══════════════╪═══╪══════════════╗
-   ║  database    │   │              ║
-   ║  (internal)  │   │              ║
-   ║        [ worker ] [ postgres ]  ║
-   ╚══════════════╪═══╪══════════════╝
-                  │
-   ╔══════════════╪══════════════════╗
-   ║  outbound    │                  ║
-   ║  (external)  │                  ║
-   ║   [ proxy ] [ api ] [ worker ]  ║
-   ╚═════════════════════════════════╝
+   ╔══════════════╪═══╪══════════════════╗
+   ║  frontend    │   │                  ║
+   ║  (internal)  │   │                  ║
+   ║          [ web ] [ api ]            ║
+   ╚══════════════╪═══╪══════════════════╝
+                      │
+   ╔══════════════════╪══════════════════╗
+   ║  database        │                  ║
+   ║  (internal)      │                  ║
+   ║   [ api ] [ worker ] [ db-init ]    ║
+   ║           [ postgres ]              ║
+   ╚═════════════════════════════════════╝
+                      │
+   ╔══════════════════╪══════════════════╗
+   ║  outbound        │                  ║
+   ║  (external)      │                  ║
+   ║   [ proxy ] [ api ] [ worker ]      ║
+   ╚═════════════════════════════════════╝
 ```
 
 | Network | Driver | `internal` | Members | Purpose |
@@ -168,18 +169,21 @@ Manages the processing lifecycle of each submitted batch. The worker uses an ato
 |---|---|---|
 | `id` | `text` PK | UUID v4 assigned at enqueue time. |
 | `entrada` | `jsonb` NOT NULL | Full `IngestaRequest` payload (immutable). |
-| `estado` | `text` | One of `recibido`, `procesando`, `terminado`, `error`. |
+| `estado` | `text` | One of `recibido`, `procesando`, `terminado`, `error`. Defaults to `recibido`. |
 | `intentos` | `integer` | Number of processing attempts. Bounded by `max_intentos` (default 3). |
 | `token` | `text` NULL | Lease token for the active worker. Cleared on completion or expiry. |
 | `vence` | `timestamptz` NULL | Lease expiry timestamp. Expired leases are reclaimed on the next poll cycle. |
 | `resultado` | `jsonb` NULL | Full pipeline output written by `ColaPostgres.terminar()` on success. |
 | `error_codigo` | `text` NULL | Error code written on failure (e.g. `reserva_agotada`). |
+| `historial` | `jsonb` NOT NULL | Ordered list of state transitions (e.g. `["recibido", "procesando", "terminado"]`). Defaults to `["recibido"]`. |
+| `creado` | `timestamptz` NOT NULL | Timestamp when the job was first enqueued (`clock_timestamp()`). |
+| `actualizado` | `timestamptz` NOT NULL | Timestamp of the most recent state change (`clock_timestamp()`). |
 
 ---
 
 ## Monorepo layout
 
-```
+```text
 G10-CommunityLabE32/
 │
 ├── backend/              # FastAPI application (Python 3.12)

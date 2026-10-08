@@ -1,7 +1,7 @@
 ---
 title: "LangGraph processing pipeline: four content routing paths"
 sidebarTitle: "Pipeline"
-description: "The CommunityLab pipeline uses a compiled LangGraph StateGraph to classify messages, score relevance, route to content generators, and consolidate output with full error isolation."
+description: "CommunityLab uses a LangGraph StateGraph to classify messages, score relevance, route to content generators, and consolidate output with error isolation."
 ---
 
 The CommunityLab pipeline is a compiled LangGraph `StateGraph` that turns a batch of ingested messages into distributable content assets and internal alerts. Orchestration is fully deterministic — the graph decides routing based on boolean signals and numeric thresholds, never on probabilistic graph edges. AI components (classifier, scorer, generators) are injected explicitly via a `Componentes` dataclass, keeping the graph reusable and testable with simulated fixtures. Every node is wrapped in an error guard so a single failing component cannot corrupt the output of other routes. The graph supports four distinct content routing paths: achievement posts, FAQ/tip cards, community highlights, and internal blocker alerts.
@@ -109,8 +109,8 @@ class Componentes:
 Use `crear_componentes()` to build the default production or simulated set, then pass it to `ejecutar_lote()`:
 
 ```python
-from pipelines.communitylab.grafo import ejecutar_lote, preparar_entrada
-from pipelines.communitylab.componentes import crear_componentes
+from pipelines.communitylab import ejecutar_lote, preparar_entrada
+from pipelines.communitylab.simulados import crear_componentes
 
 entrada = preparar_entrada(
     interacciones,                     # list[Interaccion] from the ingestion layer
@@ -119,14 +119,15 @@ entrada = preparar_entrada(
     cierre_periodo=False,
 )
 
-componentes = crear_componentes(simulado=False)   # or simulado=True for local testing
+# Pass a dict of per-message signals (es_logro, es_duda, es_bloqueo, tema, relevancia)
+componentes = crear_componentes(senales)   # simulado=True is set automatically
 
 salida = ejecutar_lote(entrada, componentes)
 ```
 
 ## Simulated mode
 
-When the environment variable `WORKER_MODE=simulado` is set (or `crear_componentes(simulado=True)` is called), the pipeline uses pre-built signal fixtures from `senales_simuladas.json` instead of making live AI calls. All generated assets are automatically prefixed with `[SIMULADO] — NO PUBLICAR` in their `copy` field, and the output object carries `"simulado": true`. This mode is safe for CI, demos, and integration tests.
+`crear_componentes(señales)` from `pipelines.communitylab.simulados` builds deterministic test doubles — no AI calls are made. It accepts a dict of per-message signals (`es_logro`, `es_duda`, `es_bloqueo`, `tema`, `relevancia`) keyed by message ID and always sets `simulado=True` on the resulting `Componentes` instance. All generated assets are automatically prefixed with `[SIMULADO — NO PUBLICAR]` in their `copy` field, and the output object carries `"simulado": true`. This mode is safe for CI, demos, and integration tests.
 
 ## Error isolation
 

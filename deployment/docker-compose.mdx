@@ -1,7 +1,7 @@
 ---
-title: "Deploy CommunityLab with Docker Compose"
+title: "CommunityLab Docker Compose: Full Stack Deployment Guide"
 sidebarTitle: "Docker Compose"
-description: "Run the full six-service CommunityLab stack locally or on a VM using Docker Compose, with ARM64 and x86_64 platform support."
+description: "Run the full six-service CommunityLab stack locally or on a VM using Docker Compose, with ARM64 and x86_64 platform support and health checks."
 ---
 
 Docker Compose is the primary way to run the complete CommunityLab stack. A single `docker compose up --build -d` starts all six services — `proxy`, `web`, `api`, `worker`, `db-init`, and `postgres` — wires them together across three private bridge networks, enforces dependency ordering with health checks, and applies `restart: unless-stopped` policies so the stack recovers automatically from container crashes. No additional orchestration tool is required for local development or single-VM production deployments.

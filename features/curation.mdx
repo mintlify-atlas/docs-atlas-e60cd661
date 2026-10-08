@@ -1,7 +1,7 @@
 ---
-title: "Asset curation workflow and state machine"
+title: "Asset curation workflow: state machine and copy edits"
 sidebarTitle: "Curation"
-description: "Review, edit, and approve AI-generated content assets through a state-machine workflow. Curators can modify copy, add comments, and manage asset state transitions."
+description: "Review and approve AI-generated content assets through a four-state machine. Curators edit copy, add comments, and advance assets from draft to approved."
 ---
 
 The curation panel is where AI-generated draft assets are reviewed before any content reaches an external channel. Every asset produced by the pipeline enters the curation layer with `estado: "generado"`. Curators can read the draft, compare it against the original source messages, edit the copy, leave reviewer notes, and move the asset through a strict state machine that prevents accidental publishing of unapproved content. All state transitions are validated server-side; invalid transitions are rejected with HTTP 422.

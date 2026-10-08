@@ -1,7 +1,7 @@
 ---
-title: "Health check endpoints: GET / and GET /health"
+title: "CommunityLab Health Check Endpoints: GET / and /health"
 sidebarTitle: "Health"
-description: "GET /health returns the API readiness status. Used by Docker Compose healthchecks to determine when the api service is ready to accept traffic."
+description: "GET / and GET /health confirm the FastAPI service is online. Docker Compose uses GET /health as its readiness probe before starting dependent containers."
 ---
 
 CommunityLab exposes two lightweight health check endpoints registered under the `Health Check` tag. They require no authentication, accept no parameters, and return a small JSON object. Docker Compose uses `GET /health` as its readiness probe — the `api` service is not marked healthy until this endpoint returns `200 OK`, which prevents the frontend and worker containers from starting before the API is ready. The nginx proxy separately exposes a `GET /healthz` route on port 8080 for its own liveness check.
@@ -64,7 +64,7 @@ curl http://127.0.0.1:8080/health
 
 The nginx reverse proxy that forwards traffic from port **8080** to the FastAPI service on port **8000** has its own liveness endpoint at:
 
-```
+```text
 http://127.0.0.1:8080/healthz
 ```
 

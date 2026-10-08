@@ -1,7 +1,7 @@
 ---
-title: "Dashboard KPI endpoint: GET /api/dashboard/kpis"
+title: "Dashboard KPIs: GET /api/dashboard/kpis Aggregated Metrics"
 sidebarTitle: "Dashboard KPIs"
-description: "GET /api/dashboard/kpis returns aggregated community metrics computed with SQL GROUP BY queries in PostgreSQL: message counts, sentiment distribution, asset funnel, and alerts."
+description: "GET /api/dashboard/kpis returns five aggregated community metrics: message count, sentiment breakdown, asset funnel totals, and internal alert count."
 ---
 
 The `Dashboard KPIs` router exposes a single endpoint that powers the entire analytics dashboard. Every metric is computed entirely inside PostgreSQL using `COUNT`, `GROUP BY`, and `ILIKE` predicates — no rows are loaded into Python memory, making this endpoint safe and fast at any dataset size. The five KPIs cover message volume, sentiment distribution, the curation asset funnel, and internal alert counts.

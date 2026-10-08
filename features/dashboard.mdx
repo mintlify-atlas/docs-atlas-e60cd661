@@ -9,16 +9,16 @@ The CommunityLab dashboard surfaces a real-time view of community health. All me
 ## KPI cards
 
 <CardGroup cols={2}>
-  <Card title="Total Messages" icon="message">
+  <Card title="Total Messages" icon="message" href="/api/messages">
     The total count of all messages ingested into the `mensajes` table across all batches, communities, and periods. This number only grows — it is never decremented when assets are rejected.
   </Card>
-  <Card title="AI Drafts" icon="robot">
+  <Card title="AI Drafts" icon="robot" href="/features/pipeline">
     The total number of content assets in the `activos` table across all states (`generado`, `revisado`, `aprobado`, `rechazado`). Represents the pipeline's complete generation output.
   </Card>
-  <Card title="Published Assets" icon="circle-check">
+  <Card title="Published Assets" icon="circle-check" href="/features/curation">
     The count of assets in `estado = "aprobado"`. These are assets that have cleared the full curation workflow and are ready for external distribution.
   </Card>
-  <Card title="Internal Alerts" icon="triangle-exclamation">
+  <Card title="Internal Alerts" icon="triangle-exclamation" href="/api/dashboard">
     The count of messages classified as potential blockers: messages where `tipo = 'bloqueo'`, or whose `texto` contains the words `bloqueo` or `error` (case-insensitive). These require community manager attention.
   </Card>
 </CardGroup>
@@ -63,7 +63,7 @@ The CommunityLab dashboard surfaces a real-time view of community health. All me
 | `skip` | integer ≥ 0 | `0` | Number of records to skip (offset-based pagination) |
 | `limit` | integer 1–100 | `10` | Number of records per page |
 
-The response includes a `total` count (filtered) so the frontend can compute how many pages exist. When a message has a `sentimiento_ref` value, it is surfaced as a badge in the feed UI (`positivo`, `negativo`, or `neutro`).
+The response includes a `total` count (filtered) so the frontend can compute how many pages exist. When a message has a `sentimiento_ref` value, it is surfaced as a badge in the feed UI (`positivo`, `negativo`, or `neutral`).
 
 ```bash title="Fetch latest 10 messages from #logros"
 curl "https://your-instance/api/mensajes?canal=%23logros&skip=0&limit=10"

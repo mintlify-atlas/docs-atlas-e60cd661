@@ -1,7 +1,7 @@
 ---
 title: "CommunityLab: Turn Discord conversations into content"
 sidebarTitle: "Home"
-description: "CommunityLab ingests Discord community messages, classifies them with AI, and generates LinkedIn posts, FAQs, and community highlights—all traceable to source messages."
+description: "CommunityLab ingests Discord messages, classifies them with AI, and generates LinkedIn posts, FAQs, and highlights—every asset traceable to source."
 ---
 
 CommunityLab is an AI-powered community intelligence platform. It takes raw Discord message exports, runs them through a LangGraph processing pipeline to detect achievements, recurring questions, and blockers, then automatically drafts content assets ready for your team to review and publish.
@@ -25,7 +25,7 @@ CommunityLab is an AI-powered community intelligence platform. It takes raw Disc
 
 <Steps>
   <Step title="Ingest a message batch">
-    Upload a JSON or CSV file of Discord messages via the web UI or the REST API. CommunityLab validates, normalizes, and deduplicates every record before storing it in PostgreSQL.
+    Upload a JSON, JSONL, or CSV file of Discord messages via the web UI or the REST API. CommunityLab validates, normalizes, and deduplicates every record before storing it in PostgreSQL.
   </Step>
   <Step title="AI pipeline processes the batch">
     The async worker picks up the job and runs it through the LangGraph graph: classification, relevance scoring, and routing to one of four content paths — achievement post, FAQ, community highlights, or internal alert.

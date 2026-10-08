@@ -1,7 +1,7 @@
 ---
 title: "OCI Object Storage for CommunityLab asset packages"
 sidebarTitle: "OCI Storage"
-description: "Understand how CommunityLab stores approved asset packages in Oracle Cloud Infrastructure Object Storage, including bucket structure, path conventions, and current integration status."
+description: "How CommunityLab stores processed asset packages in OCI Object Storage: bucket name, periodo_referencia path format, and pending-write integration status."
 ---
 
 Oracle Cloud Infrastructure (OCI) Object Storage is the persistence layer for CommunityLab's processed asset packages. After the worker finishes a job — classification, scoring, and content generation — the consolidation node is designed to write the resulting `paquete.json` to an OCI bucket, making it available for downstream approval workflows and distribution. The bucket lives on Oracle's Always Free tier, which provides sufficient storage capacity for the platform's expected volume at zero cost.
@@ -13,14 +13,14 @@ Each processed job is stored under a path that encodes the reference period and 
 ```
 communitylab-alwaysfree-bucket/
 ├── demo/
-│   └── {periodo}/
+│   └── {periodo_referencia}/
 │       └── lotes/
 │           └── {procesamiento_id}/
 │               └── paquete.json
 └── aprobados/
 ```
 
-- **`{periodo}`** — the `periodo_referencia` field from the ingestion request, formatted as an ISO week string (e.g. `2026-W38`). All batches ingested for the same week share the same prefix.
+- **`{periodo_referencia}`** — the `periodo_referencia` field from the ingestion request, formatted as an ISO week string (e.g. `2026-W38`). All batches ingested for the same week share the same prefix.
 - **`{procesamiento_id}`** — the UUID assigned to the job at ingestion time (e.g. `proc-a1b2c3d4-...`). Each processing run gets its own subdirectory, so re-runs of the same period do not overwrite each other.
 - **`aprobados/`** — reserved top-level prefix for packages that have passed the human approval step. Write access to this prefix will be restricted separately from the `demo/` prefix.
 
@@ -73,7 +73,7 @@ Regardless of which method you choose, the private key and config file must neve
 
 ## paquete.json Schema (Planned)
 
-When OCI write is implemented, the object stored at `demo/{periodo}/lotes/{procesamiento_id}/paquete.json` will match the `IngestaResponse` schema returned by the backend API:
+When OCI write is implemented, the object stored at `demo/{periodo_referencia}/lotes/{procesamiento_id}/paquete.json` will match the `IngestaResponse` schema returned by the backend API:
 
 ```json
 {
@@ -81,19 +81,25 @@ When OCI write is implemented, the object stored at `demo/{periodo}/lotes/{proce
   "resumen_comunidad": "Semana con alto volumen de logros en búsqueda de empleo...",
   "activos_distribucion_generados": [
     {
-      "tipo": "post_linkedin",
+      "id_activo": "activo-abc123",
+      "formato": "post_linkedin_x",
       "copy": "🚀 ¡Celebramos un nuevo logro en la comunidad! ...",
-      "fuentes": ["m-01", "m-03"]
+      "fuentes": ["m-01", "m-03"],
+      "estado": "borrador"
     },
     {
-      "tipo": "faq",
+      "id_activo": "activo-def456",
+      "formato": "faq_tip_tecnico",
       "copy": "💡 FAQ: ¿Cómo funciona async/await en Python? ...",
-      "fuentes": ["m-02"]
+      "fuentes": ["m-02"],
+      "estado": "borrador"
     },
     {
-      "tipo": "highlights",
+      "id_activo": "activo-ghi789",
+      "formato": "community_highlights",
       "copy": "🗓️ Highlights de la semana: ...",
-      "fuentes": ["m-01", "m-02", "m-03"]
+      "fuentes": ["m-01", "m-02", "m-03"],
+      "estado": "borrador"
     }
   ],
   "alertas_internas": [],

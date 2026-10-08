@@ -1,7 +1,7 @@
 ---
-title: "Curation endpoints: list, detail, and update assets"
+title: "Curation Endpoints: List, Detail, and Update Content Assets"
 sidebarTitle: "Curation"
-description: "REST endpoints for the asset curation workflow. List, filter, view source messages, edit copy, and transition assets through the generado→revisado→aprobado state machine."
+description: "List, filter, and review AI-generated content assets. Edit copy (auto-versioned), transition states, and inspect source messages for each asset."
 ---
 
 The `Curaduría de Activos` router manages the full editorial review lifecycle for AI-generated content assets. Assets are created by the async worker pipeline and enter the curation queue with `estado = "generado"`. Curators use these three endpoints to browse the queue, inspect the original source messages that informed each asset, edit the generated copy (each change is auto-versioned), and move assets through the review state machine until they are approved for distribution.
@@ -68,7 +68,7 @@ Returns a paginated, filterable list of content assets. Results are ordered by `
       List of `id_mensaje` values of the source messages that were used to generate this asset.
     </ResponseField>
     <ResponseField name="version" type="integer">
-      Copy version counter. Starts at 1; incremented each time `copy` is edited via PATCH.
+      Copy version counter. Starts at 1; incremented each time `copy` is sent via PATCH and its value differs from the currently stored text.
     </ResponseField>
     <ResponseField name="comentario_curador" type="string | null">
       Most recent curator comment. Overwritten (not appended) on each PATCH.

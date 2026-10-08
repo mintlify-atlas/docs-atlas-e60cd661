@@ -1,7 +1,7 @@
 ---
-title: "Batch ingestion: validate, normalize, and deduplicate messages"
+title: "Message ingestion: validate, normalize and deduplicate"
 sidebarTitle: "Ingestion"
-description: "Upload JSON, JSONL, or CSV files of Discord messages. CommunityLab validates fields, normalizes types, and deduplicates by message ID before storing in PostgreSQL."
+description: "Upload JSON, JSONL, or CSV message files. CommunityLab validates required fields, normalizes types, and deduplicates by ID before storing in PostgreSQL."
 ---
 
 The ingestion module is the entry point for all community data in CommunityLab. Every message that flows through the pipeline — whether it becomes a LinkedIn post, an FAQ, or an internal alert — begins here. The module accepts batch uploads in three file formats, normalizes field types and whitespace, rejects records that are missing required fields, and deduplicates the entire batch by message ID before handing a clean list of `Interaccion` objects to downstream stages.
@@ -98,10 +98,10 @@ The ingestion module is the entry point for all community data in CommunityLab. 
   <Step title="Enqueue or process immediately">
     The cleaned list is either:
 
-    - **Enqueued** — sent to `POST /api/v1/trabajos` (async path via `ColaPostgres.encolar`), which returns HTTP 202 and a `procesamiento_id` for polling.
-    - **Processed immediately** — submitted to `POST /api/v1/procesamientos/upload` for synchronous relevance scoring in the same request.
+    - **Enqueued via file upload** — sent to `POST /api/mensajes/procesamientos` (`multipart/form-data`), which returns HTTP 202 and a `procesamiento_id` for polling.
+    - **Enqueued via JSON body** — submitted to `POST /api/v1/trabajos` with a JSON payload, also returning HTTP 202.
 
-    Both paths accept the same normalized `Interaccion` objects. The async path is recommended for batches larger than a few dozen messages.
+    Both paths accept the same normalized `Interaccion` objects. The file-upload path (`/api/mensajes/procesamientos`) is the primary UI entry point; the JSON-body path is preferred for programmatic integrations and large batches.
   </Step>
 </Steps>
 

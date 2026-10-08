@@ -1,7 +1,7 @@
 ---
-title: "Messages endpoint: GET /api/mensajes"
+title: "Messages Endpoint: GET /api/mensajes Paginated List"
 sidebarTitle: "Messages"
-description: "Retrieve paginated community messages from PostgreSQL. Filter by canal (channel) and use skip/limit for cursor-based pagination."
+description: "Retrieve paginated community messages from PostgreSQL. Filter by channel with canal and navigate with skip/limit for server-side pagination."
 ---
 
 The `Mensajes` router provides a single read endpoint that queries the `mensajes` table in PostgreSQL with server-side pagination. All filtering and counting are performed by the database engine — the API streams only the requested page of records into memory, giving O(1) RAM usage regardless of how many messages are stored. The `total` field in every response tells the frontend exactly how many pages to render without fetching all rows.

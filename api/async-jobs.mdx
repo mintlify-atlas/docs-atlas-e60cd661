@@ -1,7 +1,7 @@
 ---
-title: "Async job endpoints: POST and GET /api/v1/trabajos"
+title: "Async Job Endpoints: POST and GET /api/v1/trabajos"
 sidebarTitle: "Async Jobs"
-description: "Submit a batch as an async job to the PostgreSQL queue. The worker picks it up, runs the LangGraph pipeline, and writes results back. Poll job status with GET /api/v1/trabajos/{id}."
+description: "Enqueue a message batch as an async job via POST /api/v1/trabajos (HTTP 202) and poll its LangGraph pipeline result with GET /api/v1/trabajos/{id}."
 ---
 
 The async job system decouples message ingestion from the AI processing pipeline. Submitting a batch with `POST /api/v1/trabajos` enqueues a job record in PostgreSQL and immediately returns an HTTP **202 Accepted** with the job UUID. A separate worker process polls the queue, runs the LangGraph consolidation pipeline, and writes the result (or error) back to the same record. Your client polls `GET /api/v1/trabajos/{id}` until `estado` transitions to `terminado` or `error`. A third path, `POST /api/mensajes/procesamientos`, offers the same async flow but accepts a multipart file upload instead of JSON.
@@ -133,7 +133,7 @@ Retrieves the current status and result of an async job. Poll this endpoint afte
 </ResponseField>
 
 <ResponseField name="intentos" type="integer">
-  Number of times the worker has attempted to process this job. The worker retries on transient failures up to the configured `reserva_agotada` limit.
+  Number of times the worker has attempted to process this job. The default maximum is 3 attempts (`max_intentos=3` in `ColaPostgres`). Once `intentos` reaches that limit, the job transitions to `error` with `error_codigo = "reserva_agotada"`.
 </ResponseField>
 
 <ResponseField name="resultado" type="object | null">

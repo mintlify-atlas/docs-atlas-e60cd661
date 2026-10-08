@@ -1,7 +1,7 @@
 ---
-title: "Ingestion endpoints: POST /api/v1/procesamientos"
+title: "Ingestion Endpoints: JSON Batch and File Upload Processing"
 sidebarTitle: "Ingestion"
-description: "Submit a batch of community messages for synchronous mock processing or file-based upload. Returns generated assets, internal alerts, and OCI storage metadata."
+description: "Submit a JSON batch or upload a file for synchronous ingestion. Returns generated assets, internal alerts, and OCI storage metadata immediately."
 ---
 
 The `Procesamientos` router provides two synchronous ingestion endpoints. The first accepts a structured JSON body and returns a fully mocked `IngestaResponse` immediately — no database writes occur, making it ideal for integration tests and frontend development against a stable fixture. The second accepts a multipart file upload (JSON, JSONL, or CSV), runs real parsing and heuristic relevance scoring on each message, and returns an `IngestaResponse` whose asset list is empty because content generation happens asynchronously inside the worker pipeline.

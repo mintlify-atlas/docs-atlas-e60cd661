@@ -1,7 +1,7 @@
 ---
 title: "OpenRouter LLM integration for CommunityLab AI nodes"
 sidebarTitle: "OpenRouter"
-description: "Configure OpenRouter as the LLM backend for CommunityLab's classification, scoring, and content generation nodes. Set WORKER_MODE=openrouter and provide an API key."
+description: "Configure OpenRouter as CommunityLab's live LLM backend: set WORKER_MODE=openrouter, review the five AI node functions, model routing, and error handling."
 ---
 
 OpenRouter is the active LLM integration used by CommunityLab's worker when `WORKER_MODE=openrouter`. It powers all five AI node functions — `analizar_real`, `puntuar_real`, `post_real`, `faq_real`, and `highlights_real` — defined in `backend/app/pipelines/agent_nodes.py`. Each node builds a prompt, calls the shared `llamar_llm_openrouter` helper, and returns a validated Python dictionary that the LangGraph pipeline passes to the next node. OpenRouter's model-routing layer means you can swap the underlying model by changing a single configuration value without touching node code.

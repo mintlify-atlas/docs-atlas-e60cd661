@@ -1,10 +1,10 @@
 ---
-title: "CommunityLab API reference overview"
+title: "CommunityLab API Reference: All Endpoints Overview"
 sidebarTitle: "Overview"
-description: "The CommunityLab REST API is a FastAPI application running on port 8000. Access it through the nginx proxy on port 8080. All endpoints return JSON."
+description: "Full endpoint index for the CommunityLab FastAPI backend: 12 routes across ingestion, async jobs, messages, curation, and dashboard KPIs."
 ---
 
-CommunityLab's backend is a **FastAPI 1.0** application that powers message ingestion, async AI processing, asset curation, and dashboard analytics for community teams. The service runs on port **8000** internally and is exposed through an nginx reverse proxy on port **8080**. Every endpoint returns JSON. FastAPI auto-generates interactive documentation — Swagger UI is available at `/docs` and ReDoc at `/redoc` — both served directly from the running API.
+CommunityLab's backend is a **FastAPI** application (app version 1.0.0) that powers message ingestion, async AI processing, asset curation, and dashboard analytics for community teams. The service runs on port **8000** internally and is exposed through an nginx reverse proxy on port **8080**. Every endpoint returns JSON. FastAPI auto-generates interactive documentation — Swagger UI is available at `/docs` and ReDoc at `/redoc` — both accessible directly on the FastAPI port (8000) during development.
 
 ## Base URL
 
@@ -15,10 +15,10 @@ CommunityLab's backend is a **FastAPI 1.0** application that powers message inge
 
 ## Interactive docs
 
-FastAPI exposes two built-in documentation UIs with no extra configuration:
+FastAPI exposes two built-in documentation UIs with no extra configuration. Because the nginx proxy routes `/api/` to FastAPI and everything else to the Next.js frontend, the interactive docs are only accessible directly on the FastAPI port:
 
-- **Swagger UI** — `http://127.0.0.1:8080/docs` — try any endpoint directly in the browser
-- **ReDoc** — `http://127.0.0.1:8080/redoc` — clean, read-only API reference
+- **Swagger UI** — `http://127.0.0.1:8000/docs` — try any endpoint directly in the browser
+- **ReDoc** — `http://127.0.0.1:8000/redoc` — clean, read-only API reference
 
 ## CORS
 
@@ -50,8 +50,8 @@ The API allows cross-origin requests from the Next.js frontend with the followin
 | `GET` | `/api/mensajes` | Mensajes | Paginated community messages with optional channel filter |
 | `POST` | `/api/mensajes/procesamientos` | Mensajes | File upload that internally enqueues an async job (HTTP 202) |
 | `GET` | `/api/curaduria/activos` | Curaduría de Activos | List and filter generated content assets with pagination |
-| `GET` | `/api/curaduria/activos/{id}` | Curaduría de Activos | Asset detail including full source message objects |
-| `PATCH` | `/api/curaduria/activos/{id}` | Curaduría de Activos | Edit copy (auto-versioned) and transition asset through the review state machine |
+| `GET` | `/api/curaduria/activos/{id_activo}` | Curaduría de Activos | Asset detail including full source message objects |
+| `PATCH` | `/api/curaduria/activos/{id_activo}` | Curaduría de Activos | Edit copy (auto-versioned) and transition asset through the review state machine |
 | `GET` | `/api/dashboard/kpis` | Dashboard KPIs | Aggregated community metrics computed with SQL GROUP BY queries |
 
 ## Error responses
