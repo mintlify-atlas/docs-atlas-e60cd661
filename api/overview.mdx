@@ -1,0 +1,89 @@
+---
+title: "CommunityLab API reference overview"
+sidebarTitle: "Overview"
+description: "The CommunityLab REST API is a FastAPI application running on port 8000. Access it through the nginx proxy on port 8080. All endpoints return JSON."
+---
+
+CommunityLab's backend is a **FastAPI 1.0** application that powers message ingestion, async AI processing, asset curation, and dashboard analytics for community teams. The service runs on port **8000** internally and is exposed through an nginx reverse proxy on port **8080**. Every endpoint returns JSON. FastAPI auto-generates interactive documentation — Swagger UI is available at `/docs` and ReDoc at `/redoc` — both served directly from the running API.
+
+## Base URL
+
+| Environment | URL |
+|---|---|
+| Through nginx proxy (default) | `http://127.0.0.1:8080` |
+| Direct to FastAPI (development) | `http://127.0.0.1:8000` |
+
+## Interactive docs
+
+FastAPI exposes two built-in documentation UIs with no extra configuration:
+
+- **Swagger UI** — `http://127.0.0.1:8080/docs` — try any endpoint directly in the browser
+- **ReDoc** — `http://127.0.0.1:8080/redoc` — clean, read-only API reference
+
+## CORS
+
+The API allows cross-origin requests from the Next.js frontend with the following configuration:
+
+| Setting | Value |
+|---|---|
+| Allowed origins | `http://localhost:3000`, `http://127.0.0.1:3000` |
+| Allowed methods | All (`*`) |
+| Allowed headers | All (`*`) |
+| Allow credentials | `true` |
+
+## Authentication
+
+<Note>
+  Authentication is **not implemented** in the current MVP. All endpoints are publicly accessible within the network. Token-based auth is planned for a future release.
+</Note>
+
+## Endpoint summary
+
+| Method | Path | Tag | Description |
+|---|---|---|---|
+| `GET` | `/` | Health Check | Root status — confirms the service is online |
+| `GET` | `/health` | Health Check | Readiness check used by Docker Compose healthcheck probes |
+| `POST` | `/api/v1/procesamientos` | Procesamientos | Synchronous mock ingestion — accepts a JSON batch and returns generated assets immediately |
+| `POST` | `/api/v1/procesamientos/upload` | Procesamientos | File upload ingestion — accepts JSON/JSONL/CSV and runs heuristic relevance scoring |
+| `POST` | `/api/v1/trabajos` | Trabajos asíncronos | Enqueue a batch as an async job to the PostgreSQL worker queue (HTTP 202) |
+| `GET` | `/api/v1/trabajos/{id}` | Trabajos asíncronos | Poll the status and result of an async job by its UUID |
+| `GET` | `/api/mensajes` | Mensajes | Paginated community messages with optional channel filter |
+| `POST` | `/api/mensajes/procesamientos` | Mensajes | File upload that internally enqueues an async job (HTTP 202) |
+| `GET` | `/api/curaduria/activos` | Curaduría de Activos | List and filter generated content assets with pagination |
+| `GET` | `/api/curaduria/activos/{id}` | Curaduría de Activos | Asset detail including full source message objects |
+| `PATCH` | `/api/curaduria/activos/{id}` | Curaduría de Activos | Edit copy (auto-versioned) and transition asset through the review state machine |
+| `GET` | `/api/dashboard/kpis` | Dashboard KPIs | Aggregated community metrics computed with SQL GROUP BY queries |
+
+## Error responses
+
+| Status | Meaning |
+|---|---|
+| `400` | Bad request — invalid file format or unparseable content |
+| `404` | Not found — requested resource (job, asset) does not exist |
+| `413` | Payload too large — uploaded file exceeds the 5 MiB limit |
+| `422` | Validation error — missing required fields, constraint violation, or invalid state transition |
+| `500` | Internal server error — unexpected failure during KPI calculation |
+| `503` | Service unavailable — PostgreSQL is unreachable or the job queue cannot be accessed |
+
+## Pages in this reference
+
+<CardGroup cols={2}>
+  <Card title="Health" icon="heart-pulse" href="/api/health">
+    GET / and GET /health readiness endpoints
+  </Card>
+  <Card title="Ingestion" icon="arrow-up-from-bracket" href="/api/ingestion">
+    Synchronous mock and file-upload ingestion
+  </Card>
+  <Card title="Async Jobs" icon="arrows-rotate" href="/api/async-jobs">
+    POST and GET /api/v1/trabajos for async pipeline execution
+  </Card>
+  <Card title="Messages" icon="messages" href="/api/messages">
+    Paginated community message retrieval
+  </Card>
+  <Card title="Curation" icon="pen-to-square" href="/api/curation">
+    Asset review lifecycle — list, detail, and update
+  </Card>
+  <Card title="Dashboard KPIs" icon="chart-bar" href="/api/dashboard">
+    Aggregated community metrics for the dashboard
+  </Card>
+</CardGroup>

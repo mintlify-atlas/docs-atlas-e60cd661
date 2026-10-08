@@ -1,0 +1,275 @@
+---
+title: "Async job endpoints: POST and GET /api/v1/trabajos"
+sidebarTitle: "Async Jobs"
+description: "Submit a batch as an async job to the PostgreSQL queue. The worker picks it up, runs the LangGraph pipeline, and writes results back. Poll job status with GET /api/v1/trabajos/{id}."
+---
+
+The async job system decouples message ingestion from the AI processing pipeline. Submitting a batch with `POST /api/v1/trabajos` enqueues a job record in PostgreSQL and immediately returns an HTTP **202 Accepted** with the job UUID. A separate worker process polls the queue, runs the LangGraph consolidation pipeline, and writes the result (or error) back to the same record. Your client polls `GET /api/v1/trabajos/{id}` until `estado` transitions to `terminado` or `error`. A third path, `POST /api/mensajes/procesamientos`, offers the same async flow but accepts a multipart file upload instead of JSON.
+
+---
+
+## POST /api/v1/trabajos
+
+Enqueues a message batch as an async job. Returns HTTP **202** immediately; the job is not processed inline.
+
+### Request body
+
+<ParamField body="origen_comunidad" type="string" required>
+  Community source identifier. Max 200 characters. Example: `"discord_comunidad_alura"`.
+</ParamField>
+
+<ParamField body="periodo_referencia" type="string" required>
+  ISO week or period label. Max 100 characters. Example: `"2026-W38"`.
+</ParamField>
+
+<ParamField body="cierre_periodo" type="boolean" default="false">
+  When `true`, signals that this is the final batch of the period and triggers a full period-summary generation pass in the worker.
+</ParamField>
+
+<ParamField body="interacciones" type="array" required>
+  List of community messages. Minimum 1 item, maximum 500 items.
+
+  <Expandable title="InteraccionTrabajo fields">
+    <ParamField body="id" type="string" required>
+      Unique message identifier. Min 1 character.
+    </ParamField>
+    <ParamField body="autor" type="string" required>
+      Message author display name. Min 1, max 150 characters.
+    </ParamField>
+    <ParamField body="canal" type="string" required>
+      Channel name. Min 1, max 50 characters.
+    </ParamField>
+    <ParamField body="fecha" type="string" required>
+      ISO 8601 datetime string of the message timestamp.
+    </ParamField>
+    <ParamField body="texto" type="string" required>
+      Full message text content. Min 1 character.
+    </ParamField>
+    <ParamField body="tipo" type="string">
+      Optional message category (e.g. `"logro"`, `"pregunta"`, `"bloqueo"`). Max 50 characters.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example request
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/trabajos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "origen_comunidad": "discord_comunidad_alura",
+    "periodo_referencia": "2026-W38",
+    "cierre_periodo": false,
+    "interacciones": [
+      {
+        "id": "m-101",
+        "autor": "luisa_data",
+        "canal": "logros",
+        "fecha": "2026-09-15T09:00:00Z",
+        "texto": "Terminé el proyecto final del bootcamp con 98 puntos.",
+        "tipo": "logro"
+      },
+      {
+        "id": "m-102",
+        "autor": "pedro_cloud",
+        "canal": "dudas-tecnicas",
+        "fecha": "2026-09-15T11:30:00Z",
+        "texto": "¿Alguien sabe cómo configurar un bucket privado en OCI Free Tier?"
+      }
+    ]
+  }'
+```
+
+### Response `202 Accepted`
+
+```json
+{
+  "procesamiento_id": "a3f8c1d2-4b5e-4f6a-9c7d-8e2b1a0f3c45",
+  "estado": "recibido",
+  "consulta": "/api/v1/trabajos/a3f8c1d2-4b5e-4f6a-9c7d-8e2b1a0f3c45"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `procesamiento_id` | string (UUID) | Unique job identifier — use this to poll for results |
+| `estado` | string | Initial state — always `"recibido"` on successful enqueue |
+| `consulta` | string | Relative path to poll for this job's status |
+
+### Error codes
+
+| Status | Condition |
+|---|---|
+| `422` | Validation error — missing required fields, field length exceeded, duplicate message IDs in the batch, or extra unknown fields in an `interaccion` |
+| `503` | PostgreSQL queue is unreachable; the job was not persisted |
+
+---
+
+## GET /api/v1/trabajos/{id}
+
+Retrieves the current status and result of an async job. Poll this endpoint after submitting a batch until `estado` is `terminado` or `error`.
+
+### Path parameter
+
+<ParamField path="identificador" type="string" required>
+  The UUID returned in `procesamiento_id` when the job was created.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Job UUID — same value as `procesamiento_id` from the POST response.
+</ResponseField>
+
+<ResponseField name="estado" type="string">
+  Current processing state. One of:
+
+  | Value | Meaning |
+  |---|---|
+  | `recibido` | Job is queued and waiting for a worker to pick it up |
+  | `procesando` | Worker has claimed the job and is running the LangGraph pipeline |
+  | `terminado` | Pipeline completed successfully; `resultado` is populated |
+  | `error` | Pipeline failed; `error_codigo` and `historial` describe the failure |
+</ResponseField>
+
+<ResponseField name="intentos" type="integer">
+  Number of times the worker has attempted to process this job. The worker retries on transient failures up to the configured `reserva_agotada` limit.
+</ResponseField>
+
+<ResponseField name="resultado" type="object | null">
+  The full consolidation output when `estado` is `terminado`. `null` at all other states. Contains the same structure as `IngestaResponse` (generated assets, alerts, OCI storage metadata) produced by the LangGraph pipeline.
+</ResponseField>
+
+<ResponseField name="error_codigo" type="string | null">
+  Machine-readable error code when `estado` is `error`. One of:
+
+  | Code | Meaning |
+  |---|---|
+  | `fallo_grafo` | The LangGraph pipeline raised an unhandled exception |
+  | `contrato_resultado` | The pipeline output did not match the expected schema |
+  | `timeout` | Processing exceeded the maximum allowed duration |
+  | `fallo_procesador` | The worker process crashed mid-execution |
+  | `reserva_agotada` | Retry limit reached; job will not be retried again |
+</ResponseField>
+
+<ResponseField name="historial" type="array of strings">
+  Ordered list of state transition log entries with timestamps. Useful for debugging stuck or failed jobs.
+</ResponseField>
+
+<ResponseField name="creado" type="string (datetime)">
+  ISO 8601 timestamp of when the job was enqueued.
+</ResponseField>
+
+<ResponseField name="actualizado" type="string (datetime)">
+  ISO 8601 timestamp of the most recent state change.
+</ResponseField>
+
+### Polling example
+
+```bash
+# Poll until estado is "terminado" or "error"
+curl http://127.0.0.1:8080/api/v1/trabajos/a3f8c1d2-4b5e-4f6a-9c7d-8e2b1a0f3c45
+```
+
+### Example response — job completed
+
+```json
+{
+  "id": "a3f8c1d2-4b5e-4f6a-9c7d-8e2b1a0f3c45",
+  "estado": "terminado",
+  "intentos": 1,
+  "resultado": {
+    "procesamiento_id": "a3f8c1d2-4b5e-4f6a-9c7d-8e2b1a0f3c45",
+    "resumen_comunidad": "Procesadas 2 interacciones para el período 2026-W38.",
+    "activos_distribucion_generados": [
+      {
+        "id_activo": "act-77",
+        "formato": "linkedin",
+        "copy": "¡Logro destacado esta semana! Luisa finalizó el bootcamp con 98 puntos. #Comunidad",
+        "fuentes": ["m-101"],
+        "estado": "generado"
+      }
+    ],
+    "alertas_internas": [],
+    "almacenamiento_oci": {
+      "bucket": "communitylab-alwaysfree-bucket",
+      "ruta": "demo/2026-W38/lotes/a3f8c1d2/paquete.json",
+      "estado": "ok"
+    }
+  },
+  "error_codigo": null,
+  "historial": [
+    "2026-09-15T12:00:01Z — recibido",
+    "2026-09-15T12:00:15Z — procesando",
+    "2026-09-15T12:00:42Z — terminado"
+  ],
+  "creado": "2026-09-15T12:00:01Z",
+  "actualizado": "2026-09-15T12:00:42Z"
+}
+```
+
+### Error codes
+
+| Status | Condition |
+|---|---|
+| `404` | No job exists for the given `identificador` |
+| `503` | PostgreSQL is temporarily unavailable; try again shortly |
+
+---
+
+## POST /api/mensajes/procesamientos
+
+This endpoint is mounted on the `Mensajes` router and provides the same async job functionality as `POST /api/v1/trabajos` but accepts a **multipart file upload** instead of a JSON body. The server reads, parses, normalizes, and deduplicates the records from the file, then calls `crear_trabajo` internally, returning the same HTTP 202 response.
+
+<Warning>
+  The file size limit is **5 MiB**. Uploads exceeding this limit return `413 Payload Too Large`.
+</Warning>
+
+### Form fields
+
+<ParamField body="file" type="file" required>
+  Message data file. Accepted extensions: `.json`, `.jsonl`, `.csv`. A `.json` file may contain either a root array or an object with an `"interacciones"` key. JSONL files are parsed line by line. CSV files must have column headers matching the interaction field names.
+</ParamField>
+
+<ParamField body="origen_comunidad" type="string" required>
+  Community source identifier.
+</ParamField>
+
+<ParamField body="periodo_referencia" type="string" required>
+  Period label for this batch.
+</ParamField>
+
+<ParamField body="cierre_periodo" type="boolean" default="false">
+  Boolean form field. Set to `true` when this upload represents the final batch of the period.
+</ParamField>
+
+### Example request
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/mensajes/procesamientos \
+  -F "file=@semana38.csv;type=text/csv" \
+  -F "origen_comunidad=discord_comunidad_alura" \
+  -F "periodo_referencia=2026-W38" \
+  -F "cierre_periodo=false"
+```
+
+### Response `202 Accepted`
+
+Identical to the `POST /api/v1/trabajos` response:
+
+```json
+{
+  "procesamiento_id": "b7d4e2f1-9a3c-4e8b-b6f0-1c5d7a2e4f89",
+  "estado": "recibido",
+  "consulta": "/api/v1/trabajos/b7d4e2f1-9a3c-4e8b-b6f0-1c5d7a2e4f89"
+}
+```
+
+### Error codes
+
+| Status | Condition |
+|---|---|
+| `400` | File extension not supported (only `.json`, `.jsonl`, `.csv` are accepted) |
+| `413` | File exceeds the 5 MiB maximum |
+| `422` | File content is invalid — incomplete fields, non-list structure, or more than 500 records after deduplication |
+| `503` | PostgreSQL queue is unreachable |

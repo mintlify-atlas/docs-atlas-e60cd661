@@ -1,0 +1,116 @@
+---
+title: "CommunityLab: Community intelligence from Discord messages"
+sidebarTitle: "Introduction"
+description: "CommunityLab transforms raw Discord exports into structured content assets using an AI-powered LangGraph pipeline. Learn what the platform does and how it works."
+---
+
+CommunityLab — Community Radar is a full-stack SaaS platform built to solve a problem every active Discord community faces: the signal-to-noise ratio. Hundreds of messages fly through channels every week — members share wins, ask the same questions repeatedly, report blockers, and mark the close of an important period — yet all of that intelligence stays buried in the chat history. CommunityLab ingests those messages in bulk, runs them through a multi-step AI pipeline powered by LangGraph and Gemini/OpenRouter, and produces ready-to-publish content assets: LinkedIn posts, FAQ cards, and community highlight summaries. Community managers and developer advocates stop copy-pasting from Discord and start shipping polished content in minutes.
+
+---
+
+## What it does
+
+CommunityLab follows a five-step flow from raw message batch to curated asset.
+
+<Steps>
+  <Step title="Ingest">
+    A JSON (or CSV) batch of Discord interactions is submitted to `POST /api/v1/procesamientos`. Each interaction carries an ID, author, channel, type, date, and raw text. The API validates field lengths, deduplicates by message ID, and persists source records to the `mensajes` table so every generated asset retains a traceable link back to its origin messages.
+  </Step>
+  <Step title="Clean & Normalize">
+    The ingestion layer validates and normalises the lote — rejecting interactions that exceed field-length limits, filling missing `tipo` values with a safe default (`sin_clasificar`), and preventing ID collisions where the same message ID would overwrite existing content. A clean, deduplicated batch is handed to the analysis stage.
+  </Step>
+  <Step title="Analyze">
+    The LangGraph pipeline scores each interaction across four dimensions: `hito_logrado` (achievement signal), `emocion` (emotional tone), `utilidad` (practical usefulness), and `recurrencia` (whether the topic is repeating). Gemini or OpenRouter-hosted models provide sentiment and topic classification. The `analizar` and `puntuar` nodes output per-message scores that feed the routing decision.
+  </Step>
+  <Step title="Generate">
+    A `router` node classifies the batch into one of four routes — **logro**, **dudas**, **bloqueo**, or **periodo** — and dispatches to the matching generator node: `generador_post_linkedin_x`, `generador_faq_tip`, `generador_highlights`, or `alerta_interna`. Each generator receives only the subset of source messages relevant to its output type, never the full batch.
+  </Step>
+  <Step title="Curate">
+    Generated assets land in the `activos` table with `estado = generado`. The frontend curation panel (`/curaduria`) lets a human reviewer inspect each asset, leave a curator comment, and promote it through the `revisado → aprobado` workflow before it is published or exported to OCI Object Storage.
+  </Step>
+</Steps>
+
+---
+
+## Key components
+
+<CardGroup cols={2}>
+  <Card title="Backend API" icon="server">
+    A **FastAPI** application (Python 3.12) that exposes `GET /health`, `POST /api/v1/procesamientos`, `POST /api/v1/procesamientos/upload`, routers for `mensajes`, `curaduria`, `dashboard`, and `trabajos_worker`. CORS is pre-configured for the Next.js frontend on port 3000. Auto-generated Swagger docs are available at `/docs`.
+  </Card>
+  <Card title="Processing Pipeline" icon="diagram-project">
+    A **LangGraph** directed graph with 10 named nodes — `inicializar`, `ingesta`, `analizar`, `puntuar`, `router`, `despachar`, and four generator/alert leaves — that orchestrate the full ingest-to-asset flow. Routing logic selects one or more generator branches per batch based on scored signals. Nodes are dependency-injected so AI backends can be swapped without modifying the graph.
+  </Card>
+  <Card title="Async Worker" icon="gears">
+    A Python worker process that polls the `trabajos_worker` queue in PostgreSQL. It uses an atomic reserve-renew-complete protocol with configurable lease time and retry limits. `WORKER_MODE=simulado` runs the full pipeline with mock AI responses; `WORKER_MODE=openrouter` calls real language models via OpenRouter.
+  </Card>
+  <Card title="Frontend Dashboard" icon="display">
+    A **Next.js / React / TypeScript / Tailwind CSS** single-page application served on port 3000. It provides an upload interface for JSON/CSV batches, a live dashboard of processing states, a curation panel for reviewing and approving generated assets, and a sources view that traces each asset back to its original messages.
+  </Card>
+  <Card title="PostgreSQL" icon="database">
+    A **PostgreSQL 16** instance that stores the three core tables: `mensajes` (raw source interactions), `activos` (generated content assets with curation state), and `trabajos_worker` (async job queue with lease tokens). Schema is applied at startup by the `db-init` service running `worker.init_db`.
+  </Card>
+  <Card title="OCI Storage" icon="cloud">
+    The planned persistence layer for final approved asset packages. Each package is stored at `demo/{periodo}/lotes/{id}/paquete.json` inside an OCI Object Storage bucket. The worker writes the `almacenamiento` field of each job result; the current MVP marks this field `no_persistido` until the OCI integration is completed.
+  </Card>
+</CardGroup>
+
+---
+
+## Content asset types
+
+CommunityLab produces three distinct asset types, each targeting a different content channel and audience need.
+
+<Tabs>
+  <Tab title="LinkedIn / X Posts">
+    **Route trigger:** `logro` — a community member has shared a significant achievement (got a job, shipped a project, earned a certification).
+
+    The `generador_post_linkedin_x` node produces a short-form social post (typically 3–5 sentences) that highlights the member's achievement in a community-facing voice. The asset is stored with `formato = linkedin`, includes the source message IDs in `fuentes[]`, and carries the tag `#CommunityHighlights`. A human curator reviews the copy before it is published.
+
+    **Example output:**
+    ```
+    ¡Orgullo en la comunidad! Uno de nuestros miembros consiguió su primer
+    empleo Dev Jr. tras mostrar su portafolio de IA. #CommunityHighlights
+    ```
+  </Tab>
+  <Tab title="FAQ / Tips">
+    **Route trigger:** `dudas` — the same question or topic has appeared in multiple interactions, indicating a knowledge gap worth addressing publicly.
+
+    The `generador_faq_tip` node condenses the recurring question and the best community answers into a reusable FAQ card or tip (`formato = faq`). The asset links back to all source messages so the curator can verify the answer quality. FAQ cards are suitable for pinned Discord messages, onboarding docs, or a community wiki.
+
+    **Example output:**
+    ```
+    FAQ Técnico: ¿Cómo manejar reintentos en LangGraph?
+    Configura una condición de fallback y limita reintentos en el router.
+    ```
+  </Tab>
+  <Tab title="Community Highlights">
+    **Route trigger:** `periodo` — a time period has closed (e.g. a sprint week) and the batch contains enough signal to summarise the community's activity.
+
+    The `generador_highlights` node produces a newsletter-style summary (`formato = newsletter`) that captures the week's standout moments, recurring themes, and notable interactions. Highlights are designed for community update emails, Notion pages, or social media roundups. Multiple source messages are cited in `fuentes[]`.
+
+    **Example output:**
+    ```
+    Resumen semanal: Gran mentoría sobre portafolios de IA y resolución
+    de dudas sobre OCI Storage.
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Who is this for?
+
+CommunityLab is built for the people who run technical communities on Discord and are responsible for turning community activity into visible content and team insights.
+
+**Community managers** who need to produce weekly highlight posts, FAQ updates, and activity reports without manually reading through hundreds of messages will find the ingest-to-curate flow saves several hours each week.
+
+**Developer advocates** running programs on Discord — bootcamps, open-source projects, developer communities — can use CommunityLab to surface member achievements and recurring questions, turning passive observation into proactive content that celebrates the community.
+
+**Marketing teams** connected to Discord-based communities can use the LinkedIn/X asset pipeline to maintain a consistent content calendar without requiring deep community context for every post. Assets arrive pre-written with source citations so the team can verify accuracy before publishing.
+
+---
+
+<Note>
+  CommunityLab is currently in active MVP development as part of the No Country G10 simulation. Core components — the FastAPI backend, LangGraph pipeline, async worker, PostgreSQL schema, Docker Compose stack, and curation frontend — are implemented and functional. Some features are still in progress: real OCI Object Storage writes (currently `no_persistido`), full end-to-end integration between the pipeline and the worker, Gemini API live inference on the production VM, and complete E2E test coverage. The `WORKER_MODE=simulado` path runs without any external API keys and is the recommended starting point.
+</Note>

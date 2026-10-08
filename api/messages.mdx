@@ -1,0 +1,118 @@
+---
+title: "Messages endpoint: GET /api/mensajes"
+sidebarTitle: "Messages"
+description: "Retrieve paginated community messages from PostgreSQL. Filter by canal (channel) and use skip/limit for cursor-based pagination."
+---
+
+The `Mensajes` router provides a single read endpoint that queries the `mensajes` table in PostgreSQL with server-side pagination. All filtering and counting are performed by the database engine — the API streams only the requested page of records into memory, giving O(1) RAM usage regardless of how many messages are stored. The `total` field in every response tells the frontend exactly how many pages to render without fetching all rows.
+
+---
+
+## GET /api/mensajes
+
+Returns a paginated list of community messages, optionally filtered to a single Discord channel.
+
+### Query parameters
+
+<ParamField query="canal" type="string">
+  Filter results to a specific channel name. When omitted, messages from all channels are returned. Must match the value stored in the `canal` column exactly (case-sensitive).
+</ParamField>
+
+<ParamField query="skip" type="integer" default="0">
+  Number of records to skip before returning results. Must be ≥ 0. Use in combination with `limit` to implement cursor-based pagination: page N starts at `skip = (N - 1) * limit`.
+</ParamField>
+
+<ParamField query="limit" type="integer" default="10">
+  Number of records to return per page. Minimum 1, maximum 100.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="items" type="array">
+  The page of message objects matching the query.
+
+  <Expandable title="Mensaje fields">
+    <ResponseField name="id_mensaje" type="string">
+      Unique message identifier (primary key in the `mensajes` table).
+    </ResponseField>
+    <ResponseField name="autor" type="string">
+      Display name of the message author. Max 150 characters.
+    </ResponseField>
+    <ResponseField name="fecha" type="string">
+      ISO 8601 datetime string of when the message was originally sent.
+    </ResponseField>
+    <ResponseField name="canal" type="string">
+      Channel where the message was posted. Max 50 characters.
+    </ResponseField>
+    <ResponseField name="tipo" type="string">
+      Message category (e.g. `"logro"`, `"pregunta"`, `"bloqueo"`). Max 50 characters.
+    </ResponseField>
+    <ResponseField name="texto" type="string">
+      Full text content of the message.
+    </ResponseField>
+    <ResponseField name="sentimiento_ref" type="string | null">
+      Sentiment label assigned by the AI pipeline after processing. One of `"positivo"`, `"negativo"`, or `"neutral"`. `null` for messages that have not yet been processed.
+    </ResponseField>
+    <ResponseField name="tema_ref" type="string | null">
+      Topic label assigned by the AI pipeline. `null` for unprocessed messages. Max 100 characters.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="total" type="integer">
+  Total number of records matching the query (with or without the `canal` filter) in the database. Use this value to calculate `total_pages = ceil(total / limit)` on the client side.
+</ResponseField>
+
+### Example requests
+
+<CodeGroup>
+```bash Basic list
+curl "http://127.0.0.1:8080/api/mensajes"
+```
+
+```bash Filter by channel
+curl "http://127.0.0.1:8080/api/mensajes?canal=dudas-tecnicas"
+```
+
+```bash Page 3 with page size 20
+curl "http://127.0.0.1:8080/api/mensajes?skip=40&limit=20"
+```
+
+```bash Channel filter with pagination
+curl "http://127.0.0.1:8080/api/mensajes?canal=logros&skip=0&limit=5"
+```
+</CodeGroup>
+
+### Example response
+
+```json
+{
+  "items": [
+    {
+      "id_mensaje": "m-101",
+      "autor": "luisa_data",
+      "fecha": "2026-09-15T09:00:00Z",
+      "canal": "logros",
+      "tipo": "logro",
+      "texto": "Terminé el proyecto final del bootcamp con 98 puntos.",
+      "sentimiento_ref": "positivo",
+      "tema_ref": "logro_académico"
+    },
+    {
+      "id_mensaje": "m-102",
+      "autor": "pedro_cloud",
+      "fecha": "2026-09-15T11:30:00Z",
+      "canal": "dudas-tecnicas",
+      "tipo": "pregunta",
+      "texto": "¿Alguien sabe cómo configurar un bucket privado en OCI Free Tier?",
+      "sentimiento_ref": null,
+      "tema_ref": null
+    }
+  ],
+  "total": 347
+}
+```
+
+<Note>
+  `sentimiento_ref` and `tema_ref` are populated by the async LangGraph worker after a job completes. Messages that have been ingested but not yet processed by the worker will have `null` for both fields.
+</Note>

@@ -1,0 +1,123 @@
+---
+title: "Configure Gemini API for CommunityLab AI analysis"
+sidebarTitle: "Gemini"
+description: "Set up Google Gemini API credentials, verify connectivity with the test script, and understand the rate limits and model configuration options."
+---
+
+Google Gemini is the primary AI provider designated for message classification and content generation in CommunityLab. The `infrastructure/gemini/` directory ships a standalone connectivity probe that verifies your API key and model availability against the Google generative language endpoint — completely independent of the backend, the worker, and Docker Compose. Run it before wiring Gemini into the pipeline to confirm your credentials and quota are valid.
+
+## Prerequisites
+
+- A Google account with access to [Google AI Studio](https://aistudio.google.com)
+- An AI Studio project on the free tier (no billing enabled)
+- A Gemini API key created in that project
+- Python 3.10 or higher (no external dependencies required — the script uses only the standard library)
+
+## Get an API Key
+
+<Steps>
+  <Step title="Open Google AI Studio">
+    Navigate to [https://aistudio.google.com](https://aistudio.google.com) and sign in with your Google account.
+  </Step>
+  <Step title="Create or select a project">
+    From the top navigation, create a new project or select an existing one. Keep billing disabled to stay on the free tier.
+  </Step>
+  <Step title="Generate an API key">
+    Go to **Get API key** → **Create API key**. Select the project you just chose or created.
+  </Step>
+  <Step title="Copy and secure the key">
+    Copy the key value immediately — it will not be shown again in full. Do not share it in screenshots, commits, chat messages, or command-line arguments.
+  </Step>
+</Steps>
+
+## Configure the Key
+
+Copy the public template to a private file:
+
+```bash
+# Linux / macOS
+cp infrastructure/gemini/.env.example infrastructure/gemini/.env
+chmod 600 infrastructure/gemini/.env
+```
+
+```powershell
+# Windows PowerShell
+Copy-Item infrastructure/gemini/.env.example infrastructure/gemini/.env
+```
+
+Open `infrastructure/gemini/.env` and replace the placeholder with your real key:
+
+```ini
+GEMINI_API_KEY=coloca_tu_clave_privada
+GEMINI_MODEL=gemini-3.5-flash
+GEMINI_FALLBACK_MODEL=gemini-3.1-flash-lite
+```
+
+The `.env` file is listed in `.gitignore` and is never committed. As an alternative, export the variables in your shell — environment variables take priority over the file.
+
+## Test Connectivity
+
+From the repository root, run one of the following commands depending on which role(s) you want to verify:
+
+```bash
+# Test both the primary and fallback models (default)
+python infrastructure/gemini/probar_gemini.py
+
+# Test only the primary model
+python infrastructure/gemini/probar_gemini.py --rol principal
+
+# Test only the fallback model
+python infrastructure/gemini/probar_gemini.py --rol respaldo
+```
+
+Each invocation sends a single synthetic prompt (`"Responde unicamente OK_GEMINI. Es una prueba de conexion."`) to each selected model and checks that the response matches `OK_GEMINI` exactly. Results are saved to `infrastructure/gemini/resultados/resultado-<rol>.json` (excluded from Git).
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | All selected models responded `OK_GEMINI` |
+| `1` | At least one test failed, or the report could not be saved |
+| `2` | Invalid configuration (missing or malformed key / model name) |
+
+If you store your credentials in a different file, pass its path with `--env-file`:
+
+```bash
+python infrastructure/gemini/probar_gemini.py --env-file /path/to/gemini.env
+```
+
+## Rate Limits (verified 24/09/2026)
+
+The following limits were observed on the free tier of the AI Studio project used for development. Verify current values in your own project's [quota dashboard](https://aistudio.google.com/rate-limit) before planning batch operations or demos.
+
+| Role | Requests / min | Input tokens / min | Requests / day |
+|------|---------------:|-------------------:|---------------:|
+| Principal (`gemini-3.5-flash`) | 5 | 250,000 | 20 |
+| Respaldo (`gemini-3.1-flash-lite`) | 15 | 250,000 | 500 |
+
+The script performs no retries. If you receive an HTTP 429 or 503, wait before repeating to avoid unnecessary quota consumption. The fallback model does not automatically bypass shared project-level restrictions.
+
+## Models
+
+The two environment variables map to distinct quota pools:
+
+- **`GEMINI_MODEL`** — the primary model used for all calls unless explicitly overridden.
+- **`GEMINI_FALLBACK_MODEL`** — a lighter model intended as a manual backup during quota exhaustion or outages.
+
+The connectivity test script selects roles independently; it does **not** implement automatic failover. If `--rol ambos` is used and the primary fails, the script still runs the fallback test and reports each result separately.
+
+## Run Tests Without an API Key
+
+The test suite uses only fictitious credentials and mocked HTTP responses. No real API calls are made.
+
+```bash
+python -m unittest discover -s infrastructure/gemini -p "test_*.py" -v
+```
+
+The tests cover: API key sent in the correct header, use of synthetic text only, role selection, environment variable priority, invalid configuration paths, unexpected responses, timeout, and HTTP 401 / 429 / 503 error codes. They also verify that report files and error output never expose the fictitious key.
+
+<Warning>
+  The Gemini integration in the main processing pipeline is a **planned feature** and is not yet active in production. The current worker only supports two modes: `WORKER_MODE=simulado` (pre-defined fixture signals, no external calls) and `WORKER_MODE=openrouter` (live LLM calls via OpenRouter). The `infrastructure/gemini/` probe is a standalone verification tool and does not activate AI processing in the rest of the project.
+</Warning>
+
+<Note>
+  The API key travels exclusively in the `x-goog-api-key` HTTP request header over HTTPS. It is never appended to the request URL, never written to logs, and never included in the JSON payload.
+</Note>

@@ -1,0 +1,114 @@
+---
+title: "OCI Object Storage for CommunityLab asset packages"
+sidebarTitle: "OCI Storage"
+description: "Understand how CommunityLab stores approved asset packages in Oracle Cloud Infrastructure Object Storage, including bucket structure, path conventions, and current integration status."
+---
+
+Oracle Cloud Infrastructure (OCI) Object Storage is the persistence layer for CommunityLab's processed asset packages. After the worker finishes a job — classification, scoring, and content generation — the consolidation node is designed to write the resulting `paquete.json` to an OCI bucket, making it available for downstream approval workflows and distribution. The bucket lives on Oracle's Always Free tier, which provides sufficient storage capacity for the platform's expected volume at zero cost.
+
+## Planned Bucket Structure
+
+Each processed job is stored under a path that encodes the reference period and the unique job identifier, making it straightforward to list all packages for a given week or to retrieve a specific run.
+
+```
+communitylab-alwaysfree-bucket/
+├── demo/
+│   └── {periodo}/
+│       └── lotes/
+│           └── {procesamiento_id}/
+│               └── paquete.json
+└── aprobados/
+```
+
+- **`{periodo}`** — the `periodo_referencia` field from the ingestion request, formatted as an ISO week string (e.g. `2026-W38`). All batches ingested for the same week share the same prefix.
+- **`{procesamiento_id}`** — the UUID assigned to the job at ingestion time (e.g. `proc-a1b2c3d4-...`). Each processing run gets its own subdirectory, so re-runs of the same period do not overwrite each other.
+- **`aprobados/`** — reserved top-level prefix for packages that have passed the human approval step. Write access to this prefix will be restricted separately from the `demo/` prefix.
+
+## Current Status
+
+OCI Object Storage write is not yet wired into the production worker. The consolidation node currently sets the storage field to a sentinel value indicating the asset is pending persistence:
+
+```json
+{
+  "almacenamiento": {
+    "proveedor": "pendiente",
+    "estado": "no_persistido"
+  }
+}
+```
+
+The mock ingestion endpoint uses the bucket name `communitylab-alwaysfree-bucket` and returns `"estado": "simulado_pendiente_worker"` to indicate that the path has been reserved but no object has been written yet. Assets remain in PostgreSQL until the OCI SDK is wired in.
+
+## Bucket Creation
+
+<Steps>
+  <Step title="Log in to OCI Console">
+    Go to [https://cloud.oracle.com](https://cloud.oracle.com) and sign in with your Oracle Cloud account. If you do not have one, register for the Always Free tier — no credit card is required for the free resources.
+  </Step>
+  <Step title="Navigate to Object Storage">
+    From the main menu, select **Storage** → **Object Storage & Archive Storage**. Make sure you are in the correct compartment (root compartment is fine for a single-team project).
+  </Step>
+  <Step title="Create the bucket">
+    Click **Create Bucket** and fill in the following:
+
+    - **Bucket Name**: `communitylab-alwaysfree-bucket`
+    - **Default Storage Tier**: Standard
+    - **Visibility**: Private (public access is not required — the worker writes via the OCI SDK using authenticated credentials)
+
+    Leave encryption and tagging at defaults and click **Create**.
+  </Step>
+  <Step title="Record the namespace and region">
+    After creation, open the bucket detail page and note the **Object Storage Namespace** (a short alphanumeric string assigned to your tenancy) and the **Region** identifier (e.g. `us-ashburn-1`). You will need both values when constructing the bucket endpoint URL for the OCI SDK.
+  </Step>
+</Steps>
+
+## Authentication
+
+The OCI SDK supports two authentication strategies suitable for CommunityLab:
+
+- **OCI config file** (`~/.oci/config`) — the standard method for local development and CI. Generate an API signing key pair in the OCI Console under **Profile → API Keys**, download the private key, and write the config file with your tenancy OCID, user OCID, fingerprint, key path, and region.
+- **Instance Principal** — the recommended method when the worker runs on an OCI Compute instance. No credentials are stored on disk; the instance identity token is used automatically by the SDK.
+
+Regardless of which method you choose, the private key and config file must never be committed to the repository. Add them to `.gitignore` and provision them via a secret manager or environment-specific deployment step.
+
+## paquete.json Schema (Planned)
+
+When OCI write is implemented, the object stored at `demo/{periodo}/lotes/{procesamiento_id}/paquete.json` will match the `IngestaResponse` schema returned by the backend API:
+
+```json
+{
+  "procesamiento_id": "proc-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "resumen_comunidad": "Semana con alto volumen de logros en búsqueda de empleo...",
+  "activos_distribucion_generados": [
+    {
+      "tipo": "post_linkedin",
+      "copy": "🚀 ¡Celebramos un nuevo logro en la comunidad! ...",
+      "fuentes": ["m-01", "m-03"]
+    },
+    {
+      "tipo": "faq",
+      "copy": "💡 FAQ: ¿Cómo funciona async/await en Python? ...",
+      "fuentes": ["m-02"]
+    },
+    {
+      "tipo": "highlights",
+      "copy": "🗓️ Highlights de la semana: ...",
+      "fuentes": ["m-01", "m-02", "m-03"]
+    }
+  ],
+  "alertas_internas": [],
+  "almacenamiento_oci": {
+    "bucket": "communitylab-alwaysfree-bucket",
+    "ruta": "demo/2026-W38/lotes/proc-a1b2c3d4-e5f6-7890-abcd-ef1234567890/paquete.json",
+    "estado": "persistido"
+  }
+}
+```
+
+<Note>
+  OCI Object Storage write is a **planned integration** and is not active in current deployments. The worker's consolidation node sets `estado: "no_persistido"` and all generated assets are stored exclusively in PostgreSQL. The `almacenamiento_oci` field in API responses reflects this pending state until the OCI SDK client is implemented and connected to the consolidation node.
+</Note>
+
+<Tip>
+  Oracle's Always Free tier includes one Object Storage bucket with 20 GB of storage and no data egress charges for transfers within the same OCI region. Keep the worker and the bucket in the same region to stay within the free tier and avoid latency from cross-region transfers.
+</Tip>

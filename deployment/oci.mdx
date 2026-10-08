@@ -1,0 +1,172 @@
+---
+title: "Deploy CommunityLab on Oracle Cloud Infrastructure"
+sidebarTitle: "OCI Deployment"
+description: "Provision an OCI Always Free Ampere A1 VM, install Docker, and deploy the full CommunityLab stack. Includes Object Storage bucket setup."
+---
+
+Oracle Cloud Infrastructure is the target production environment for CommunityLab. The Always Free tier provides an Ampere A1 Flex VM with up to 4 OCPU and 24 GB of RAM on ARM64 hardware — the same architecture the Docker Compose stack defaults to — at no cost. Object Storage buckets on the Always Free tier complement the VM for storing processed signal packages. This guide walks through provisioning the VM, installing Docker, deploying the application, and creating the Object Storage bucket.
+
+## VM provisioning
+
+<Steps>
+  <Step title="Open the Create Instance wizard">
+    Sign in to the [OCI Console](https://cloud.oracle.com). Navigate to **Compute → Instances** and click **Create instance**.
+  </Step>
+
+  <Step title="Select the Ampere A1 shape">
+    Under **Image and shape**, click **Change shape**. Select:
+
+    - **Shape series**: Ampere
+    - **Shape name**: `VM.Standard.A1.Flex`
+    - **OCPU count**: 1 (Always Free limit is 4 total across all A1 instances)
+    - **Memory**: 6 GB minimum; 8 GB recommended
+
+    Under **Image**, choose **Canonical Ubuntu 22.04** (ARM64 build).
+  </Step>
+
+  <Step title="Configure networking">
+    Choose an existing VCN or create a new one. Select a **public subnet** and enable **Assign a public IPv4 address**. The public IP is how you will reach the proxy after deployment.
+  </Step>
+
+  <Step title="Add your SSH key">
+    Under **Add SSH keys**, paste your public key (`~/.ssh/id_ed25519.pub` or equivalent). OCI does not provide a root password — SSH key access is the only way in.
+  </Step>
+
+  <Step title="Set ingress security rules">
+    After the instance is created (or in advance via the VCN's Security List), add two ingress rules:
+
+    | Protocol | Source CIDR | Destination port | Purpose |
+    |---|---|---|---|
+    | TCP | `0.0.0.0/0` | `22` | SSH access |
+    | TCP | `0.0.0.0/0` | `8080` | CommunityLab proxy |
+
+    If you change `HTTP_PORT` in `.env`, update the security list rule to match.
+  </Step>
+
+  <Step title="Launch the instance">
+    Click **Create**. The VM will move through **PROVISIONING → RUNNING** in about two minutes. Note the **Public IP address** shown on the instance detail page — you will use it in the next section.
+  </Step>
+</Steps>
+
+## Docker setup on the VM
+
+SSH into the new instance (replace `<PUBLIC_IP>` with your VM's IP):
+
+```bash
+ssh ubuntu@<PUBLIC_IP>
+```
+
+Install Docker and the Compose plugin, then add your user to the `docker` group so you can run `docker` commands without `sudo`:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-plugin
+
+sudo usermod -aG docker $USER
+newgrp docker          # apply the group change without logging out
+
+# Verify
+docker version
+docker compose version
+```
+
+## Deploy the application
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/No-Country-simulation/G10-CommunityLabE32.git
+    cd G10-CommunityLabE32
+    ```
+  </Step>
+
+  <Step title="Create the production .env file">
+    ```bash
+    cp .env.example .env
+    chmod 600 .env
+    nano .env            # or use vim / any editor
+    ```
+
+    Set these values for a production deployment:
+
+    ```ini
+    POSTGRES_DB=communitylab
+    POSTGRES_USER=communitylab
+    POSTGRES_PASSWORD=<strong-random-secret-at-least-32-chars>
+
+    # Ampere A1 is ARM64 — keep this value
+    DOCKER_PLATFORM=linux/arm64
+
+    # Bind to all interfaces so the VM's public IP is reachable
+    HTTP_BIND_ADDRESS=0.0.0.0
+    HTTP_PORT=8080
+
+    # Set to openrouter to enable LLM processing
+    WORKER_MODE=simulado
+    OPENROUTER_API_KEY=
+    ```
+
+    Generate a strong password with:
+
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Step>
+
+  <Step title="Build and start the stack">
+    ```bash
+    docker compose up --build -d
+    docker compose ps
+    ```
+
+    Wait until all long-running services show `running (healthy)` and `db-init` shows `exited (0)`. The first build takes several minutes as pip packages are downloaded for the backend and worker images, and the Next.js frontend is compiled.
+
+    Once healthy, the application is reachable at:
+
+    ```
+    http://<PUBLIC_IP>:8080
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+On a public VM, set `HTTP_BIND_ADDRESS=0.0.0.0` in `.env` so the Nginx proxy listens on all network interfaces and can be reached from the internet via the VM's public IP. The default `127.0.0.1` only allows loopback connections, which is safe for laptops but makes the application unreachable externally.
+</Tip>
+
+## Object Storage bucket setup
+
+OCI Object Storage provides S3-compatible storage for CommunityLab signal packages on the Always Free tier.
+
+**Create the bucket:**
+
+1. In the OCI Console, navigate to **Storage → Object Storage & Archive Storage → Buckets**.
+2. Click **Create Bucket**.
+3. Enter the bucket name: `communitylab-alwaysfree-bucket`
+4. Storage tier: **Standard**
+5. Encryption: **Encrypt using Oracle managed keys** (default)
+6. Click **Create**.
+
+**Intended directory structure inside the bucket:**
+
+```
+communitylab-alwaysfree-bucket/
+├── demo/
+│   └── {periodo}/
+│       └── lotes/
+│           └── {id}/
+│               └── paquete.json
+└── aprobados/
+```
+
+- `demo/{periodo}/lotes/{id}/paquete.json` — raw signal packages produced by the worker for a given processing period and batch ID
+- `aprobados/` — packages that have passed review and are approved for downstream use
+
+**Current integration status:**
+
+The OCI SDK integration is a planned feature. In the current release the worker sets `almacenamiento.estado` to `no_persistido` — packages are processed in memory but not yet uploaded to Object Storage. The bucket structure above documents the intended layout for when the integration is implemented.
+
+## Capacity note
+
+<Note>
+The OCI Ampere A1 Always Free shape (`VM.Standard.A1.Flex`) may show **"Out of capacity"** in some regions when you try to provision it. This is a known and recurring limitation of the free tier. If provisioning fails, try a different Availability Domain in the same region, try a different region, or wait and retry later. In the meantime, continue development using the local Docker Compose setup — the same `DOCKER_PLATFORM=linux/arm64` image runs identically on Apple Silicon.
+</Note>

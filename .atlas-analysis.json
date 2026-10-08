@@ -1,0 +1,103 @@
+{
+  "projectType": "saas",
+  "projectName": "CommunityLab — Community Radar",
+  "projectDescription": "A full-stack platform that ingests Discord community messages, runs them through an AI-powered LangGraph pipeline to classify sentiment and topics, and generates ready-to-publish content assets (LinkedIn posts, FAQs, community highlights) with a curation workflow and dashboard.",
+  "theme": "luma",
+  "primaryColor": "#6366f1",
+  "lightColor": "#a5b4fc",
+  "darkColor": "#312e81",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker-compose",
+              "deployment/environment-variables",
+              "deployment/oci"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/ingestion",
+              "features/pipeline",
+              "features/curation",
+              "features/dashboard"
+            ]
+          },
+          {
+            "group": "AI & Integrations",
+            "pages": [
+              "integrations/gemini",
+              "integrations/openrouter",
+              "integrations/oci-storage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/health",
+              "api/ingestion",
+              "api/async-jobs",
+              "api/messages",
+              "api/curation",
+              "api/dashboard"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "JSON/CSV batch ingestion with validation, normalization, and deduplication",
+    "LangGraph-based multi-node processing pipeline with four routing paths (achievement, recurring question, blocker, period summary)",
+    "AI classification and relevance scoring via Gemini or OpenRouter",
+    "Automated generation of LinkedIn posts, FAQ/tips, and community highlights",
+    "Asset curation workflow with state machine (generated → reviewed → approved/rejected)",
+    "Async worker with PostgreSQL-backed job queue and at-least-once delivery",
+    "Real-time dashboard with KPI metrics (messages, sentiment distribution, assets, alerts)",
+    "Full Docker Compose stack: proxy (nginx), web (Next.js), api (FastAPI), worker, PostgreSQL",
+    "OCI Object Storage integration for persisting generated asset packages",
+    "Source traceability: every generated asset links back to original messages"
+  ],
+  "publicApiSurface": [
+    "GET /health",
+    "GET / (root status)",
+    "POST /api/v1/procesamientos (sync mock ingestion)",
+    "POST /api/v1/procesamientos/upload (file upload ingestion)",
+    "POST /api/v1/trabajos (async job creation)",
+    "GET /api/v1/trabajos/{id} (job status query)",
+    "GET /api/mensajes (paginated message list with canal filter)",
+    "POST /api/mensajes/procesamientos (file upload via messages router)",
+    "GET /api/curaduria/activos (paginated asset list with estado/formato filters)",
+    "GET /api/curaduria/activos/{id} (asset detail with source messages)",
+    "PATCH /api/curaduria/activos/{id} (update copy, state, curator comment)",
+    "GET /api/dashboard/kpis (aggregated KPI metrics)",
+    "ejecutar_lote(entrada, componentes) — pipeline Python API",
+    "preparar_entrada(interacciones, *, origen_comunidad, periodo_referencia, cierre_periodo) — pipeline adapter",
+    "enrutar_lote(lote, configuracion) — deterministic router",
+    "ColaPostgres(url) — PostgreSQL job queue adapter"
+  ]
+}

@@ -1,0 +1,232 @@
+---
+title: "CommunityLab system architecture and service topology"
+sidebarTitle: "Architecture"
+description: "Understand the six-service Docker Compose stack, the LangGraph processing graph, PostgreSQL schema, and the data flow from message ingestion to OCI Storage."
+---
+
+CommunityLab is organized as a monorepo with six top-level module directories — `backend/`, `frontend/`, `pipelines/`, `worker/`, `infrastructure/`, and `proxy/` — plus `data/` for sample inputs and `docs/` for internal documentation. The runtime stack is declared in a single `docker-compose.yml` at the repository root and assembles six Docker services: an Nginx reverse proxy, a Next.js frontend, a FastAPI backend, an async Python worker, a one-shot schema-init job, and a PostgreSQL database. All inter-service communication is constrained to isolated Docker bridge networks, with only the proxy exposing a host port.
+
+---
+
+## Service topology
+
+Each service has a clearly scoped responsibility. The table below maps each service to its image source, exposed port, and role in the system.
+
+| Service | Image / Build | Port | Role |
+|---|---|---|---|
+| `proxy` | `nginx:stable-alpine` (official) | **8080** → host | Nginx reverse proxy. Routes `/api/*` and `/health` to the `api` service; routes all other paths to the `web` service. The only service that binds to the host network. |
+| `web` | Built from `./frontend` (Next.js) | 3000 (internal) | Next.js / React / TypeScript / Tailwind frontend. Serves the dashboard, upload form, curation panel, and sources view. Sets `API_PROXY_TARGET=http://api:8000` at build time. |
+| `api` | Built from `backend/Dockerfile` | 8000 (internal) | FastAPI backend. Handles all HTTP requests, validates input schemas, writes source messages to `mensajes`, enqueues jobs in `trabajos_worker`, and serves generated assets from `activos`. |
+| `worker` | Built from `worker/Dockerfile` | — (no port) | Python async worker. Polls `trabajos_worker` for `recibido` jobs, acquires a lease token, executes the LangGraph pipeline, and persists generated activos. Mode controlled by `WORKER_MODE`. |
+| `db-init` | Same image as `worker` | — (exits after run) | One-shot schema migration. Runs `python -m worker.init_db` which calls `Base.metadata.create_all` (SQLAlchemy) and `ColaPostgres.inicializar` (raw SQL for `trabajos_worker`). Must complete before `api` or `worker` start. |
+| `postgres` | `postgres:16-alpine` (official) | 5432 (internal) | PostgreSQL 16 database. Stores `mensajes`, `activos`, and `trabajos_worker`. Data is persisted to the named volume `postgres_data`. Health-checked with `pg_isready`. |
+
+All services except `proxy` use `restart: unless-stopped` and structured JSON logging capped at 10 MB / 3 files.
+
+---
+
+## Network layout
+
+The Compose stack defines three Docker bridge networks that enforce strict isolation between service tiers.
+
+```
+ HOST
+  │
+  └─ 8080 ──► [ proxy ]
+                  │   \
+   ╔══════════════╪═══╪══════════════╗
+   ║  frontend    │   │              ║
+   ║  (internal)  │   │              ║
+   ║          [ web ] [ api ]        ║
+   ╚══════════════╪═══╪══════════════╝
+                  │   │
+   ╔══════════════╪═══╪══════════════╗
+   ║  database    │   │              ║
+   ║  (internal)  │   │              ║
+   ║        [ worker ] [ postgres ]  ║
+   ╚══════════════╪═══╪══════════════╝
+                  │
+   ╔══════════════╪══════════════════╗
+   ║  outbound    │                  ║
+   ║  (external)  │                  ║
+   ║   [ proxy ] [ api ] [ worker ]  ║
+   ╚═════════════════════════════════╝
+```
+
+| Network | Driver | `internal` | Members | Purpose |
+|---|---|---|---|---|
+| `frontend` | bridge | **true** | `proxy`, `web`, `api` | Isolated LAN for HTTP between the proxy and the application tier. No internet access. |
+| `database` | bridge | **true** | `api`, `worker`, `db-init`, `postgres` | Isolated LAN for PostgreSQL connections. Neither the proxy nor the frontend can reach the database directly. |
+| `outbound` | bridge | false | `proxy`, `api`, `worker` | Provides outbound internet access for the proxy (upstream health checks), the API (OpenRouter calls), and the worker (LLM inference). |
+
+The `web` and `postgres` services have no outbound internet access by design.
+
+---
+
+## LangGraph processing graph
+
+The CommunityLab pipeline is implemented as a LangGraph `StateGraph` compiled from the `grafo.mmd` definition in `pipelines/communitylab/`. The graph carries a shared state object holding the raw batch, normalized interactions, per-message scores, routing decisions, generated drafts, internal alerts, errors, and an execution trace.
+
+The pipeline executes 10 named nodes in the following sequence:
+
+1. **`inicializar`** — sets up the shared state, seeds the execution trace, and validates that the input batch is non-empty.
+2. **`ingesta`** — normalizes the raw interaction list (accepts both `list[dict]` and `list[Interaccion]` Pydantic models), deduplicates by `id`, and stores the clean batch in state.
+3. **`analizar`** — invokes the injected analysis callback (Gemini / OpenRouter in production, a test double in `simulado` mode) to classify each interaction by sentiment, topic, and semantic signals.
+4. **`puntuar`** — scores each interaction across four dimensions: `hito_logrado`, `emocion`, `utilidad`, `recurrencia`. Scores feed the router's threshold logic.
+5. **`router`** — evaluates the scored batch against routing thresholds and emits one or more **routing decisions**: `logro`, `dudas`, `bloqueo`, or `periodo`. An empty batch bypasses all generators and goes directly to consolidation.
+6. **`despachar`** — sequentially dispatches each pending routing decision to the appropriate generator or alert node. Processes decisions one at a time; re-enters itself after each generator returns until all decisions are consumed.
+7. **`generador_post_linkedin_x`** — generates a LinkedIn/X social post from the achievement-signal interactions. Receives only the relevant source message subset, not the full batch.
+8. **`generador_faq_tip`** — generates an FAQ card or actionable tip from recurring-question interactions. Cites all contributing source messages in `fuentes[]`.
+9. **`generador_highlights`** — generates a period-summary newsletter snippet from end-of-cycle interactions.
+10. **`alerta_interna`** — produces an internal alert record for blocker-type interactions. This output is **never** surfaced as a publishable asset; it feeds an internal monitoring channel only.
+11. **`consolidacion`** — collects all generated drafts and alerts, validates source ID references, assigns deterministic asset IDs (SHA-256 of `job_id + draft_id`), and returns the final `resultado` payload.
+
+The four routing paths, their trigger conditions, and their output types:
+
+<Tabs>
+  <Tab title="logro — Achievement">
+    **Trigger:** One or more interactions score above the `hito_logrado` threshold, indicating a member has shared a concrete achievement (new job, shipped project, certification, etc.).
+
+    **Generator node:** `generador_post_linkedin_x`
+
+    **Output asset:** `formato = linkedin` — a short-form social media post celebrating the achievement in a community voice. Stored in `activos` with `estado = generado` and sourced back to the originating interaction(s).
+
+    **Priority:** Second highest. Processed after `bloqueo` decisions if both are present in the same batch.
+  </Tab>
+  <Tab title="dudas — Recurring Question">
+    **Trigger:** The same question or topic appears across multiple interactions, indicating a knowledge gap that warrants a reusable answer.
+
+    **Generator node:** `generador_faq_tip`
+
+    **Output asset:** `formato = faq` — a question-and-answer card or tip suitable for pinned messages, onboarding docs, or a community wiki. All contributing messages are listed in `fuentes[]`.
+
+    **Priority:** Third. Processed after `bloqueo` and `logro`.
+  </Tab>
+  <Tab title="bloqueo — Blocker Alert">
+    **Trigger:** One or more interactions report a critical blocker — a service outage, a blocking error, or a problem that is preventing multiple members from making progress.
+
+    **Generator node:** `alerta_interna`
+
+    **Output:** An internal alert record with `nivel = bloqueo`. This record is **not** stored in `activos` and is **not** shown in the curation panel. It is included in the `alertas_internas` array of the job result for internal team routing.
+
+    **Priority:** Highest. Always dispatched before any content-generating route.
+  </Tab>
+  <Tab title="periodo — Period Close">
+    **Trigger:** The batch contains a signal that a time period has closed (`cierre_periodo`), or the aggregated activity across the batch is sufficient to generate a summary.
+
+    **Generator node:** `generador_highlights`
+
+    **Output asset:** `formato = newsletter` — a period-summary highlight reel covering standout moments, activity themes, and member contributions. Suitable for community update emails and Notion pages.
+
+    **Priority:** Lowest. Processed after all other route decisions in the batch.
+  </Tab>
+</Tabs>
+
+---
+
+## Data model
+
+CommunityLab uses three PostgreSQL tables. Schema is applied by `db-init` at container startup.
+
+### `mensajes` — Source interactions
+
+Stores every raw Discord interaction that has been ingested. Records are immutable after creation; if the same `id_mensaje` is submitted again with different content the worker rejects the batch.
+
+| Column | Type | Description |
+|---|---|---|
+| `id_mensaje` | `text` PK | Caller-supplied message ID (e.g. `"m-01"`). Indexed. |
+| `autor` | `text` NOT NULL | Discord username. Max 150 chars. Indexed. |
+| `canal` | `text` NOT NULL | Discord channel name. Max 50 chars. Indexed. |
+| `fecha` | `text` NOT NULL | ISO 8601 timestamp string as supplied by the caller. |
+| `tipo` | `text` NOT NULL | Interaction type (e.g. `mensaje`, `pregunta`, `reporte`). Max 50 chars. Indexed. Defaults to `sin_clasificar` if omitted. |
+| `texto` | `text` NOT NULL | Raw message body. |
+| `sentimiento_ref` | `text` NULL | Sentiment label written back by the analysis node (e.g. `positivo`, `negativo`, `neutral`). |
+| `tema_ref` | `text` NULL | Topic label written back by the analysis node. |
+
+### `activos` — Generated content assets
+
+Stores every content asset produced by a generator node, along with its curation lifecycle state.
+
+| Column | Type | Description |
+|---|---|---|
+| `id_activo` | `varchar(50)` PK | Stable SHA-256-derived ID (e.g. `"act-a3f9..."`). Indexed. |
+| `formato` | `varchar(50)` NOT NULL | Asset type: `linkedin`, `faq`, or `newsletter`. Indexed. |
+| `titulo` | `varchar(255)` NOT NULL | Human-readable title generated from the asset type. |
+| `copy` | `text` NOT NULL | Generated content body. |
+| `estado` | `varchar(30)` | Curation state: `generado` → `revisado` → `aprobado` or `rechazado`. Defaults to `generado`. Indexed. |
+| `fuentes` | `JSON` | Array of `id_mensaje` strings that were used to generate this asset. |
+| `version` | `integer` | Starts at `1`. Incremented on curator edits. |
+| `comentario_curador` | `varchar(500)` NULL | Free-text curator note added during review. |
+| `fecha_creacion` | `datetime` | Set once at insert time (UTC). |
+| `fecha_actualizacion` | `datetime` | Updated on every curator action. |
+
+### `trabajos_worker` — Async job queue
+
+Manages the processing lifecycle of each submitted batch. The worker uses an atomic reserve-renew-complete protocol with lease tokens to ensure at-least-once delivery without duplicate processing.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `text` PK | UUID v4 assigned at enqueue time. |
+| `entrada` | `jsonb` NOT NULL | Full `IngestaRequest` payload (immutable). |
+| `estado` | `text` | One of `recibido`, `procesando`, `terminado`, `error`. |
+| `intentos` | `integer` | Number of processing attempts. Bounded by `max_intentos` (default 3). |
+| `token` | `text` NULL | Lease token for the active worker. Cleared on completion or expiry. |
+| `vence` | `timestamptz` NULL | Lease expiry timestamp. Expired leases are reclaimed on the next poll cycle. |
+| `resultado` | `jsonb` NULL | Full pipeline output written by `ColaPostgres.terminar()` on success. |
+| `error_codigo` | `text` NULL | Error code written on failure (e.g. `reserva_agotada`). |
+
+---
+
+## Monorepo layout
+
+```
+G10-CommunityLabE32/
+│
+├── backend/              # FastAPI application (Python 3.12)
+│   └── app/
+│       ├── main.py       # App factory, CORS, router registration
+│       ├── api/routes/   # procesamientos, trabajos
+│       ├── routers/      # mensajes, curaduria, dashboard
+│       ├── models/       # SQLAlchemy ORM: Activo, Mensaje
+│       ├── schemas/      # Pydantic schemas: IngestaRequest/Response, etc.
+│       ├── services/     # ingestion.py, relevancia.py
+│       ├── core/         # database.py, dependencias.py
+│       └── pipelines/    # agent_nodes.py (LangGraph integration shim)
+│
+├── frontend/             # Next.js / React / TypeScript / Tailwind
+│
+├── pipelines/
+│   └── communitylab/     # LangGraph StateGraph implementation
+│       ├── grafo.mmd     # Mermaid diagram of the compiled graph
+│       ├── README.md     # Integration contract and pending items
+│       └── tests/        # 28 self-contained unit tests
+│
+├── worker/               # Async Python worker
+│   ├── run.py            # Entry point: poll → reserve → process → complete
+│   ├── core.py           # Trabajo dataclass
+│   ├── processor.py      # Pipeline invocation logic
+│   ├── store_postgres.py # ColaPostgres: enqueue, reserve, renew, fail, terminar
+│   ├── init_db.py        # Schema migration entry point
+│   ├── schema.sql        # trabajos_worker DDL
+│   └── healthcheck.py    # Docker HEALTHCHECK script
+│
+├── infrastructure/       # OCI, Gemini, and deployment configs
+│   └── gemini/           # Gemini API configuration guide
+│
+├── data/                 # Sample JSON/CSV message batches for testing
+│
+├── proxy/
+│   └── nginx.conf        # Nginx routing rules for the reverse proxy
+│
+├── docs/                 # Internal technical documentation and ADRs
+│
+├── docker-compose.yml    # Six-service production-equivalent stack
+├── compose.worker-local.yml  # Alternate Compose for local worker development
+└── .env.example          # Environment variable template (no secrets)
+```
+
+---
+
+<Note>
+  OCI Object Storage persistence is a planned integration. The current `almacenamiento_oci` field returned by `POST /api/v1/procesamientos` reflects the intended bucket path and structure (`demo/{periodo}/lotes/{id}/paquete.json`) but reports `estado: "simulado_pendiente_worker"` or `estado: "no_persistido"` because the actual write to OCI has not yet been implemented. The OCI VM provisioning is also blocked by regional capacity availability. Both the live write path and the OCI deployment will be completed in a subsequent milestone and documented here when available.
+</Note>

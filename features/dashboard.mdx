@@ -1,0 +1,124 @@
+---
+title: "Community dashboard: real-time KPIs and message feed"
+sidebarTitle: "Dashboard"
+description: "The CommunityLab dashboard shows live metrics aggregated in PostgreSQL: message counts, sentiment distribution, curation funnel, and internal alerts."
+---
+
+The CommunityLab dashboard surfaces a real-time view of community health. All metrics are aggregated directly in PostgreSQL using `GROUP BY` and `COUNT` queries — no data is loaded into Python memory, making the KPI endpoint safe to poll frequently even on large datasets. The dashboard combines four KPI cards that track the full data lifecycle (from raw ingested messages through to published assets) with a live, paginated message feed that curators and community managers can filter by channel.
+
+## KPI cards
+
+<CardGroup cols={2}>
+  <Card title="Total Messages" icon="message">
+    The total count of all messages ingested into the `mensajes` table across all batches, communities, and periods. This number only grows — it is never decremented when assets are rejected.
+  </Card>
+  <Card title="AI Drafts" icon="robot">
+    The total number of content assets in the `activos` table across all states (`generado`, `revisado`, `aprobado`, `rechazado`). Represents the pipeline's complete generation output.
+  </Card>
+  <Card title="Published Assets" icon="circle-check">
+    The count of assets in `estado = "aprobado"`. These are assets that have cleared the full curation workflow and are ready for external distribution.
+  </Card>
+  <Card title="Internal Alerts" icon="triangle-exclamation">
+    The count of messages classified as potential blockers: messages where `tipo = 'bloqueo'`, or whose `texto` contains the words `bloqueo` or `error` (case-insensitive). These require community manager attention.
+  </Card>
+</CardGroup>
+
+## KPI response fields
+
+`GET /api/dashboard/kpis` returns a single JSON object with the following fields:
+
+<ResponseField name="total_mensajes" type="integer">
+  Total number of messages in the `mensajes` table. Computed as `SELECT COUNT(id_mensaje) FROM mensajes`.
+</ResponseField>
+
+<ResponseField name="distribucion_sentimiento" type="object">
+  Sentiment distribution across all ingested messages. Contains three integer keys:
+
+  - `positivo` — count of messages where `sentimiento_ref = 'positivo'`
+  - `negativo` — count of messages where `sentimiento_ref = 'negativo'`
+  - `neutral` — count of messages with `sentimiento_ref = 'neutral'`, `null`, or any unrecognized value
+
+  Computed with a single `GROUP BY sentimiento_ref` query; results are normalized into these three keys in Python after the aggregation.
+</ResponseField>
+
+<ResponseField name="activos_generados" type="integer">
+  Total count of assets across all curation states (`generado` + `revisado` + `aprobado` + `rechazado`). Computed as `SUM` of all per-state counts from `GROUP BY estado` on the `activos` table.
+</ResponseField>
+
+<ResponseField name="activos_aprobados" type="integer">
+  Count of assets currently in `estado = "aprobado"`. Derived from the same per-state count map used for `activos_generados`.
+</ResponseField>
+
+<ResponseField name="alertas_internas" type="integer">
+  Count of messages that match the blocker filter: `tipo = 'bloqueo'` OR `texto ILIKE '%bloqueo%'` OR `texto ILIKE '%error%'`. Represents the volume of issues that may require community manager intervention.
+</ResponseField>
+
+## Message feed
+
+`GET /api/mensajes` returns a paginated list of ingested messages. It supports channel filtering and is suitable for the live feed panel in the dashboard UI.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `canal` | string | — | Filter messages to a specific channel (e.g. `#dudas-tecnicas`) |
+| `skip` | integer ≥ 0 | `0` | Number of records to skip (offset-based pagination) |
+| `limit` | integer 1–100 | `10` | Number of records per page |
+
+The response includes a `total` count (filtered) so the frontend can compute how many pages exist. When a message has a `sentimiento_ref` value, it is surfaced as a badge in the feed UI (`positivo`, `negativo`, or `neutro`).
+
+```bash title="Fetch latest 10 messages from #logros"
+curl "https://your-instance/api/mensajes?canal=%23logros&skip=0&limit=10"
+```
+
+```json title="Message feed response"
+{
+  "items": [
+    {
+      "id_mensaje": "msg-001",
+      "autor": "ana_dev",
+      "canal": "#logros",
+      "fecha": "2026-06-01T10:00:00+00:00",
+      "tipo": "logro",
+      "texto": "¡Conseguí mi primer empleo como Dev Jr.! Gracias a todos 🚀",
+      "sentimiento_ref": "positivo",
+      "tema_ref": "Carrera y Empleo"
+    }
+  ],
+  "total": 1
+}
+```
+
+## Sentiment distribution
+
+The `distribucion_sentimiento` object is computed in a single SQL query:
+
+```sql
+SELECT sentimiento_ref, COUNT(id_mensaje)
+FROM mensajes
+GROUP BY sentimiento_ref;
+```
+
+The result rows are normalized in Python into the fixed keys `positivo`, `negativo`, and `neutral`. Rows with `sentimiento_ref = null` or any value not matching `positivo`/`negativo` are bucketed into `neutral`. This means the three values always sum to `total_mensajes`.
+
+## Example request and response
+
+```bash title="Fetch all KPIs"
+curl "https://your-instance/api/dashboard/kpis"
+```
+
+```json title="KPI response"
+{
+  "total_mensajes": 3847,
+  "distribucion_sentimiento": {
+    "positivo": 1423,
+    "negativo": 312,
+    "neutral": 2112
+  },
+  "activos_generados": 156,
+  "activos_aprobados": 89,
+  "alertas_internas": 47
+}
+```
+
+<Note>
+  All KPI aggregations run as SQL `GROUP BY` / `COUNT` queries directly in PostgreSQL. No rows are transferred to the Python process for counting — the database engine returns a single scalar or a small set of aggregate rows. This gives the endpoint O(1) memory consumption regardless of how many millions of messages are stored, and makes it safe to poll at dashboard refresh intervals without risk of out-of-memory errors.
+</Note>

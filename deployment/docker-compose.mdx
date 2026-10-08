@@ -1,0 +1,158 @@
+---
+title: "Deploy CommunityLab with Docker Compose"
+sidebarTitle: "Docker Compose"
+description: "Run the full six-service CommunityLab stack locally or on a VM using Docker Compose, with ARM64 and x86_64 platform support."
+---
+
+Docker Compose is the primary way to run the complete CommunityLab stack. A single `docker compose up --build -d` starts all six services — `proxy`, `web`, `api`, `worker`, `db-init`, and `postgres` — wires them together across three private bridge networks, enforces dependency ordering with health checks, and applies `restart: unless-stopped` policies so the stack recovers automatically from container crashes. No additional orchestration tool is required for local development or single-VM production deployments.
+
+## Prerequisites
+
+- **Docker 24+** with BuildKit enabled (bundled by default since Docker 23)
+- **Docker Compose v2** (`docker compose` — note: no hyphen)
+- **4 GB RAM minimum** — the full build of the Next.js frontend is the most memory-intensive step
+- A `.env` file at the repository root copied from `.env.example` with `POSTGRES_PASSWORD` set
+
+## Services overview
+
+Each service in `docker-compose.yml` has a defined role, build context, network membership, and health check. The table below summarises the key attributes.
+
+| Service | Image / Build context | Host port | Depends on | Health check |
+|---|---|---|---|---|
+| `proxy` | `nginx:stable-alpine` | `127.0.0.1:8080:80` | `web` (healthy), `api` (healthy) | `GET /healthz` → 200 |
+| `web` | `./frontend` | none | — | `node -e fetch('http://127.0.0.1:3000/')` |
+| `api` | `backend/Dockerfile` (context: `.`) | none | `postgres` (healthy), `db-init` (completed) | `GET http://127.0.0.1:8000/health` |
+| `worker` | `worker/Dockerfile` (context: `.`) | none | `postgres` (healthy), `db-init` (completed) | `python /app/worker/healthcheck.py` |
+| `db-init` | `worker/Dockerfile` (context: `.`) | none | `postgres` (healthy) | _(one-shot, no health check)_ |
+| `postgres` | `postgres:16-alpine` | none | — | `pg_isready` |
+
+**Network topology** — three internal bridge networks isolate traffic:
+
+- `frontend` (internal) — `proxy` ↔ `web` ↔ `api`
+- `database` (internal) — `api` ↔ `worker` ↔ `db-init` ↔ `postgres`
+- `outbound` (external) — `proxy`, `api`, `worker` (for future third-party integrations)
+
+`postgres` is never attached to `outbound`, so it has no path to the internet.
+
+## Platform configuration
+
+The compose file defaults to `linux/arm64` for every service image, making it immediately usable on Apple M1/M2 machines and the OCI Ampere A1 Always Free VM. The platform is controlled by a single variable.
+
+```bash
+# ARM64 — default, for Apple Silicon and OCI Ampere A1
+DOCKER_PLATFORM=linux/arm64
+
+# x86_64 — for Intel/AMD workstations and servers
+DOCKER_PLATFORM=linux/amd64
+```
+
+Set this in your `.env` file. If Docker Desktop has QEMU-based emulation enabled, you can also build `linux/arm64` images on an Intel machine (at a performance cost during build).
+
+<Tip>
+When running on an Intel or AMD machine without hardware ARM64 support, add `DOCKER_PLATFORM=linux/amd64` to your `.env` file to avoid slow emulated builds.
+</Tip>
+
+## Build and start
+
+Copy the example environment file, fill in your password, then build and start the stack:
+
+```bash
+cp .env.example .env
+# Edit .env — set POSTGRES_PASSWORD to a strong secret value
+
+docker compose up --build -d
+```
+
+The `--build` flag rebuilds all images from source. Omit it on subsequent starts if the source has not changed. The `-d` flag detaches the process; logs stream separately (see [Viewing logs](#viewing-logs)).
+
+Verify that all services are running and healthy:
+
+```bash
+docker compose ps
+```
+
+Expected output (abbreviated):
+
+```
+NAME                        STATUS              PORTS
+communitylab-proxy-1        running (healthy)   127.0.0.1:8080->80/tcp
+communitylab-web-1          running (healthy)
+communitylab-api-1          running (healthy)
+communitylab-worker-1       running (healthy)
+communitylab-db-init-1      exited (0)
+communitylab-postgres-1     running (healthy)
+```
+
+`db-init` exiting with code `0` is expected — it runs `python -m worker.init_db` once and then stops. All other long-running services should show `running (healthy)`.
+
+## Health checks
+
+Every service declares explicit health check timing in `docker-compose.yml`. The compose file will not route traffic through `proxy` until both `web` and `api` report healthy, preventing 502 errors on fresh boots.
+
+| Service | Interval | Timeout | Retries | Start period |
+|---|---|---|---|---|
+| `proxy` | 10 s | 5 s | 5 | 10 s |
+| `web` | 10 s | 5 s | 5 | 30 s |
+| `api` | 10 s | 5 s | 5 | 30 s |
+| `worker` | 10 s | 5 s | 5 | 30 s |
+| `postgres` | 5 s | 5 s | 10 | 30 s |
+
+The `worker` health check (`worker/healthcheck.py`) verifies two things simultaneously: a heartbeat file at `/tmp/communitylab-worker-heartbeat` must have been written within the last 15 seconds, **and** a direct `SELECT 1` against PostgreSQL must succeed. A stale heartbeat alone is enough to mark the worker unhealthy.
+
+## Viewing logs
+
+Tail logs from a specific service with the `-f` flag:
+
+```bash
+# FastAPI backend
+docker compose logs -f api
+
+# LangGraph worker
+docker compose logs -f worker
+
+# Nginx proxy access and error logs
+docker compose logs -f proxy
+
+# Next.js frontend
+docker compose logs -f web
+```
+
+Each service uses the `json-file` logging driver with a 10 MB rolling cap and up to 3 rotated files, so disk usage stays bounded.
+
+## Stopping the stack
+
+Stop all containers while preserving the PostgreSQL data volume:
+
+```bash
+docker compose down
+```
+
+Stop all containers **and permanently delete** the `postgres_data` volume:
+
+```bash
+docker compose down -v
+```
+
+<Warning>
+`docker compose down -v` irreversibly destroys the `postgres_data` volume. All database contents will be lost. Only use it when you intend to reset the database to a clean state.
+</Warning>
+
+## Worker-local override
+
+The file `compose.worker-local.yml` is a Compose override for local worker development. It exposes PostgreSQL on `127.0.0.1:15439` so you can connect to the database directly from your host machine without going through Docker's internal network — useful when iterating on worker logic outside of a container.
+
+```bash
+# Start with the local-worker override
+docker compose -f docker-compose.yml -f compose.worker-local.yml up -d
+
+# Connect to postgres from the host
+psql -h 127.0.0.1 -p 15439 -U communitylab -d communitylab
+```
+
+<Warning>
+Do not use `compose.worker-local.yml` in VM or production deployments. The override intentionally exposes PostgreSQL on a host port, which is only safe in a trusted local environment.
+</Warning>
+
+<Warning>
+`POSTGRES_PASSWORD` must be set in your `.env` file before running any `docker compose` command. The compose file uses the `${POSTGRES_PASSWORD:?...}` syntax, which causes Docker Compose to exit with an error immediately if the variable is missing or empty.
+</Warning>

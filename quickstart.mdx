@@ -1,47 +1,292 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get started with CommunityLab in 5 minutes"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, configure environment variables, and start the full Docker Compose stack to ingest your first batch of community messages."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through spinning up the complete six-service CommunityLab stack on your local machine, ingesting a sample batch of Discord messages via the API, and viewing the generated content assets in the curation dashboard — all without any external API keys. By the end you will have a running instance of the proxy (port 8080), Next.js frontend (3000), FastAPI backend (8000), async worker, schema-init job, and PostgreSQL database, with at least one generated asset visible in the curation panel.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+---
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Info>
+  **Prerequisites before you begin:**
+  - **Docker** and **Docker Compose** v2 (`docker compose` — note: no hyphen). Verify with `docker compose version`.
+  - **Git** to clone the repository.
+  - **Python 3.12** (optional — only needed if you want to run the LangGraph pipeline or backend locally outside Docker).
+  - An x86-64 or Apple Silicon (ARM64) machine. The Compose file targets `linux/arm64` by default; Intel/AMD users set `DOCKER_PLATFORM=linux/amd64` in `.env`.
+</Info>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Clone the monorepo and enter the project root. All subsequent commands assume you are running from this directory.
 
     ```bash
-    npm install your-package
+    git clone https://github.com/No-Country-simulation/G10-CommunityLabE32.git
+    cd G10-CommunityLabE32
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Create your .env file">
+    Copy the example environment file to `.env` and fill in the required values. The `.env` file is git-ignored — never commit it.
 
     ```bash
-    your-cli init
+    cp .env.example .env
+    ```
+
+    Open `.env` in your editor and set at minimum `POSTGRES_PASSWORD`. The worker will refuse to start if `POSTGRES_PASSWORD` is empty. The full set of variables and their defaults:
+
+    ```ini
+    # Database
+    POSTGRES_DB=communitylab
+    POSTGRES_USER=communitylab
+    # Required: choose a strong password, e.g. POSTGRES_PASSWORD=changeme123
+    POSTGRES_PASSWORD=changeme123
+
+    # Docker platform
+    # ARM64 (Apple Silicon, OCI Ampere): linux/arm64 (default)
+    # Intel/AMD: linux/amd64
+    DOCKER_PLATFORM=linux/arm64
+
+    # Proxy binding
+    HTTP_BIND_ADDRESS=127.0.0.1
+    HTTP_PORT=8080
+
+    # Worker mode
+    # simulado — full pipeline with mocked AI, no external keys required
+    # openrouter — calls real LLMs via OpenRouter (requires OPENROUTER_API_KEY)
+    WORKER_MODE=simulado
+
+    # Leave blank when using simulado mode
+    OPENROUTER_API_KEY=
+    ```
+
+    <Tip>
+      Use `WORKER_MODE=simulado` for local development and demos. The pipeline runs end-to-end — ingestion, scoring, routing, generation, and consolidation — using simulated AI responses so you do not need a Gemini or OpenRouter API key. Switch to `WORKER_MODE=openrouter` (and set `OPENROUTER_API_KEY`) only when you want real model inference.
+    </Tip>
+  </Step>
+
+  <Step title="Build and start the stack">
+    Build all images and start the six services in detached mode. The first build takes 3–5 minutes as it downloads base images and installs Python/Node dependencies.
+
+    ```bash
+    docker compose up --build -d
+    ```
+
+    Docker Compose starts the services in dependency order:
+
+    | Service | Port | Role |
+    |---|---|---|
+    | `postgres` | internal | PostgreSQL 16 database with persistent volume |
+    | `db-init` | — | One-shot schema migration; runs `worker.init_db` and exits |
+    | `api` | 8000 (internal) | FastAPI backend; waits for `postgres` and `db-init` |
+    | `worker` | — | Async job processor; polls `trabajos_worker` queue |
+    | `web` | 3000 (internal) | Next.js frontend; proxies API calls to `http://api:8000` |
+    | `proxy` | **8080** (host) | Nginx reverse proxy; routes `/api/*` → api, `/` → web |
+
+    Watch the startup logs until all services are healthy:
+
+    ```bash
+    docker compose ps
+    ```
+
+    All services should show `healthy` or `running` status before you proceed.
+  </Step>
+
+  <Step title="Verify the API is healthy">
+    Confirm the full proxy → API path is working by hitting the health endpoint:
+
+    ```bash
+    curl -s http://127.0.0.1:8080/health
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "estado": "ok",
+      "servicio": "communitylab-api"
+    }
+    ```
+
+    If you get a connection refused error, check that the proxy service is healthy: `docker compose logs proxy`.
+  </Step>
+
+  <Step title="Open the dashboard">
+    Navigate to the frontend in your browser:
+
+    ```
+    http://127.0.0.1:8080
+    ```
+
+    The dashboard loads the CommunityLab interface. At this point the database is empty — no messages, no assets. The next step sends the first batch.
+  </Step>
+
+  <Step title="Ingest a test batch">
+    Submit a JSON batch of Discord interactions to the processing endpoint. This example includes six messages covering an achievement, a recurring technical question, and a blocker — enough to trigger multiple generator routes.
+
+    ```bash
+    curl -s -X POST http://127.0.0.1:8080/api/v1/procesamientos \
+      -H "Content-Type: application/json" \
+      -d '{
+        "origen_comunidad": "discord_comunidad_alura",
+        "periodo_referencia": "2026-W38",
+        "interacciones": [
+          {
+            "id": "m-01",
+            "autor": "ana_garcia",
+            "canal": "general",
+            "tipo": "mensaje",
+            "fecha": "2026-09-15T10:30:00Z",
+            "texto": "¡Lo logré! Conseguí mi primer empleo como Dev Jr. El portafolio de IA que armé en la comunidad marcó la diferencia 🎉"
+          },
+          {
+            "id": "m-02",
+            "autor": "carlos_dev",
+            "canal": "ayuda-tecnica",
+            "tipo": "pregunta",
+            "fecha": "2026-09-15T11:00:00Z",
+            "texto": "¿Cómo manejan los reintentos en LangGraph cuando un nodo falla? Ya lo pregunté la semana pasada pero no quedó claro."
+          },
+          {
+            "id": "m-03",
+            "autor": "maria_ops",
+            "canal": "ayuda-tecnica",
+            "tipo": "respuesta",
+            "fecha": "2026-09-15T11:20:00Z",
+            "texto": "Para reintentos en LangGraph: configurá una condición de fallback en el edge condicional y limitá los reintentos en el router con un contador en el estado."
+          },
+          {
+            "id": "m-04",
+            "autor": "juan_backend",
+            "canal": "bugs",
+            "tipo": "reporte",
+            "fecha": "2026-09-15T14:00:00Z",
+            "texto": "Bloqueado: timeout 504 intermitente al intentar escribir en el bucket de OCI. Llevo 2 horas sin poder avanzar."
+          },
+          {
+            "id": "m-05",
+            "autor": "sofia_ml",
+            "canal": "proyectos",
+            "tipo": "mensaje",
+            "fecha": "2026-09-16T09:00:00Z",
+            "texto": "Terminé el módulo de embeddings esta semana. El pipeline completo ya corre en Docker, incluidos los tests."
+          },
+          {
+            "id": "m-06",
+            "autor": "pedro_frontend",
+            "canal": "general",
+            "tipo": "mensaje",
+            "fecha": "2026-09-16T17:00:00Z",
+            "texto": "Resumen de la semana: lanzamos dos nuevas features, resolvimos 5 dudas técnicas recurrentes y tuvimos 3 logros de miembros. ¡Gran semana equipo!"
+          }
+        ]
+      }'
+    ```
+
+    The API responds immediately with the processing result, including generated assets and any internal alerts:
+
+    ```json
+    {
+      "procesamiento_id": "proc-mock-2026-001",
+      "resumen_comunidad": "Procesadas 6 interacciones para el período 2026-W38.",
+      "activos_distribucion_generados": [
+        {
+          "id_activo": "act-01",
+          "formato": "linkedin",
+          "copy": "¡Orgullo en la comunidad! Uno de nuestros miembros consiguió su primer empleo Dev Jr. tras mostrar su portafolio de IA. #CommunityHighlights",
+          "fuentes": ["m-01"],
+          "estado": "generado"
+        },
+        {
+          "id_activo": "act-02",
+          "formato": "faq",
+          "copy": "FAQ Técnico: ¿Cómo manejar reintentos en LangGraph? Configura una condición de fallback y limita reintentos en el router.",
+          "fuentes": ["m-02", "m-03"],
+          "estado": "generado"
+        },
+        {
+          "id_activo": "act-03",
+          "formato": "newsletter",
+          "copy": "Resumen semanal: Gran mentoría sobre portafolios de IA y resolución de dudas sobre OCI Storage.",
+          "fuentes": ["m-04", "m-05"],
+          "estado": "generado"
+        }
+      ],
+      "alertas_internas": [
+        {
+          "id_alerta": "alt-01",
+          "nivel": "bloqueo",
+          "mensaje": "Usuario reportó timeout 504 intermitente al intentar acceder al bucket de OCI.",
+          "fuente": "m-06"
+        }
+      ],
+      "almacenamiento_oci": {
+        "bucket": "communitylab-alwaysfree-bucket",
+        "ruta": "demo/2026-W38/lotes/proc-mock-2026-001/paquete.json",
+        "estado": "simulado_pendiente_worker"
+      }
+    }
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Review assets in the curation panel">
+    Open the curation panel to inspect the generated assets and approve them for publication:
+
     ```
+    http://127.0.0.1:8080/curaduria
+    ```
+
+    The panel shows all assets with `estado = generado`. For each asset you can:
+    - Read the generated copy and inspect the source message references in `fuentes[]`.
+    - Add a curator comment.
+    - Advance the status to `revisado` or `aprobado`.
+    - Reject an asset with `rechazado` to exclude it from publication.
+
+    Assets promoted to `aprobado` are ready for export. OCI Object Storage persistence is planned and will be triggered from this step in a future release.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+---
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+<Accordion title="Run the backend locally without Docker">
+  If you want to iterate on the FastAPI backend without rebuilding Docker images, you can run it directly with a local virtual environment. You still need a running PostgreSQL instance (you can keep using the Docker Compose `postgres` service).
+
+  **1. Create and activate a virtual environment:**
+
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate   # macOS / Linux
+  # .venv\Scripts\activate    # Windows
+  ```
+
+  **2. Install backend dependencies:**
+
+  ```bash
+  pip install -r backend/requirements.txt
+  ```
+
+  **3. Export the required environment variables:**
+
+  ```bash
+  export DATABASE_URL="postgresql+asyncpg://communitylab:changeme123@127.0.0.1:5432/communitylab"
+  export OPENROUTER_API_KEY=""
+  ```
+
+  Replace `changeme123` with the value of `POSTGRES_PASSWORD` in your `.env` file. Make sure the `postgres` container is running (`docker compose up -d postgres db-init`) before starting the API.
+
+  **4. Start the API with hot-reload:**
+
+  ```bash
+  python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+  ```
+
+  The API is now available at `http://127.0.0.1:8000`. Interactive Swagger docs are at `http://127.0.0.1:8000/docs`. The Next.js frontend will proxy `/api/*` requests to this local process if you also run it with `npm run dev` in the `frontend/` directory.
+</Accordion>
+
+---
+
+<Tip>
+  **`simulado` vs `openrouter` worker modes:**
+  - `WORKER_MODE=simulado` — the async worker runs the complete LangGraph pipeline using hard-coded stub responses. No external API calls are made. Generated assets are marked `[SIMULADO] — NO PUBLICAR`. This is the right mode for local development, CI, and demos.
+  - `WORKER_MODE=openrouter` — the worker sends scoring and generation prompts to real language models via the OpenRouter API. You must set `OPENROUTER_API_KEY` to a valid key. Assets generated in this mode are suitable for real curation and publication. This mode incurs API costs per batch processed.
 </Tip>

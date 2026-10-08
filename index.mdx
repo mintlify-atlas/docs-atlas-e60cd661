@@ -1,20 +1,62 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "CommunityLab: Turn Discord conversations into content"
+sidebarTitle: "Home"
+description: "CommunityLab ingests Discord community messages, classifies them with AI, and generates LinkedIn posts, FAQs, and community highlights—all traceable to source messages."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+CommunityLab is an AI-powered community intelligence platform. It takes raw Discord message exports, runs them through a LangGraph processing pipeline to detect achievements, recurring questions, and blockers, then automatically drafts content assets ready for your team to review and publish.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what CommunityLab does and how its components fit together.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Spin up the full stack locally and process your first batch in minutes.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Explore the five-service Docker Compose stack and the LangGraph pipeline.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Full reference for every HTTP endpoint exposed by the FastAPI backend.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## How it works
+
+<Steps>
+  <Step title="Ingest a message batch">
+    Upload a JSON or CSV file of Discord messages via the web UI or the REST API. CommunityLab validates, normalizes, and deduplicates every record before storing it in PostgreSQL.
+  </Step>
+  <Step title="AI pipeline processes the batch">
+    The async worker picks up the job and runs it through the LangGraph graph: classification, relevance scoring, and routing to one of four content paths — achievement post, FAQ, community highlights, or internal alert.
+  </Step>
+  <Step title="Review and approve assets">
+    Generated drafts land in the Curation panel. Curators edit copy, transition assets through the state machine (generated → reviewed → approved), and add review comments.
+  </Step>
+  <Step title="Publish and store">
+    Approved assets are persisted to OCI Object Storage under a structured path by community origin and period, ready for downstream publishing workflows.
+  </Step>
+</Steps>
+
+## Key capabilities
+
+<CardGroup cols={3}>
+  <Card title="Batch Ingestion" icon="upload" href="/features/ingestion">
+    JSON, JSONL, and CSV uploads with automatic deduplication and field validation.
+  </Card>
+  <Card title="LangGraph Pipeline" icon="diagram-project" href="/features/pipeline">
+    Four routing paths built on a compiled StateGraph with full error isolation.
+  </Card>
+  <Card title="Curation Workflow" icon="pen-to-square" href="/features/curation">
+    State-machine-driven review with versioning and curator comments.
+  </Card>
+  <Card title="Dashboard KPIs" icon="chart-bar" href="/features/dashboard">
+    Real-time metrics: message counts, sentiment distribution, asset funnel.
+  </Card>
+  <Card title="AI Integrations" icon="brain" href="/integrations/gemini">
+    Gemini and OpenRouter backends with structured JSON output contracts.
+  </Card>
+  <Card title="OCI Storage" icon="cloud" href="/integrations/oci-storage">
+    Immutable asset packages stored in Oracle Cloud Object Storage.
+  </Card>
+</CardGroup>

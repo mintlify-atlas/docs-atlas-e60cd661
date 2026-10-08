@@ -1,0 +1,197 @@
+---
+title: "Environment variables and secrets for CommunityLab"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for all environment variables consumed by the CommunityLab services. Copy .env.example and fill in required secrets before starting."
+---
+
+All runtime configuration for the CommunityLab stack flows through a single `.env` file at the repository root. This file is listed in `.gitignore` and must never be committed — only the public template `.env.example` is tracked by Git. Before starting the stack for the first time, copy the template and fill in every required value:
+
+```bash
+cp .env.example .env
+chmod 600 .env   # restrict read access to your own user
+```
+
+## `.env.example` template
+
+The following is the complete contents of `.env.example` as shipped in the repository:
+
+```ini
+POSTGRES_DB=communitylab
+POSTGRES_USER=communitylab
+# Definir un secreto propio en .env; nunca subir .env.
+POSTGRES_PASSWORD=
+DOCKER_PLATFORM=linux/arm64
+# PC Intel/AMD sin emulación: DOCKER_PLATFORM=linux/amd64
+HTTP_BIND_ADDRESS=127.0.0.1
+HTTP_PORT=8080
+# simulado no llama a proveedores externos.
+WORKER_MODE=simulado
+OPENROUTER_API_KEY=
+```
+
+---
+
+## PostgreSQL
+
+These three variables configure the PostgreSQL container and are referenced by both the `api` and `worker` services when they construct their `DATABASE_URL`.
+
+### `POSTGRES_DB`
+
+| | |
+|---|---|
+| **Default** | `communitylab` |
+| **Required** | No |
+
+The name of the database that PostgreSQL will create on first boot and that the API and worker services will connect to.
+
+### `POSTGRES_USER`
+
+| | |
+|---|---|
+| **Default** | `communitylab` |
+| **Required** | No |
+
+The PostgreSQL role (username) used by the application services. This user is granted full ownership of `POSTGRES_DB`.
+
+### `POSTGRES_PASSWORD`
+
+| | |
+|---|---|
+| **Default** | _(none)_ |
+| **Required** | **Yes** |
+
+The password for `POSTGRES_USER`. There is no default value. The compose file uses the `${POSTGRES_PASSWORD:?...}` mandatory-substitution syntax — if this variable is empty or absent, `docker compose up` will immediately print an error and refuse to start.
+
+Use a randomly generated secret of at least 32 characters in any environment beyond a personal laptop:
+
+```bash
+# Generate a strong password
+openssl rand -base64 32
+```
+
+---
+
+## Docker platform and proxy binding
+
+### `DOCKER_PLATFORM`
+
+| | |
+|---|---|
+| **Default** | `linux/arm64` |
+| **Required** | No |
+
+The OCI image platform passed to every `build:` and `image:` directive via `platform:`. The default targets Apple M1/M2 hardware and the OCI Ampere A1 Always Free VM. Change this to `linux/amd64` when running on Intel or AMD hardware without QEMU emulation.
+
+```ini
+# Apple Silicon or OCI Ampere A1
+DOCKER_PLATFORM=linux/arm64
+
+# Intel / AMD workstation or server
+DOCKER_PLATFORM=linux/amd64
+```
+
+### `HTTP_BIND_ADDRESS`
+
+| | |
+|---|---|
+| **Default** | `127.0.0.1` |
+| **Required** | No |
+
+The host IP address the Nginx proxy binds to. The default `127.0.0.1` restricts access to the local machine only. On a public VM where you want the application to be accessible from the internet, change this to `0.0.0.0`.
+
+### `HTTP_PORT`
+
+| | |
+|---|---|
+| **Default** | `8080` |
+| **Required** | No |
+
+The host port mapped to port 80 of the Nginx proxy container. The application will be reachable at `http://<HTTP_BIND_ADDRESS>:<HTTP_PORT>` from the host. Change this if port 8080 is already in use on your machine.
+
+---
+
+## Worker
+
+### `WORKER_MODE`
+
+| | |
+|---|---|
+| **Default** | _(none — must be set explicitly)_ |
+| **Required** | **Yes** |
+| **Accepted values** | `simulado`, `openrouter` |
+
+Controls how the worker pipeline processes community signal batches:
+
+- **`simulado`** — the worker runs entirely offline using pre-defined signal fixtures. No external API calls are made. Use this for local development and CI.
+- **`openrouter`** — the worker calls the OpenRouter API (LLM inference) to analyse signals. Requires `OPENROUTER_API_KEY` to be set.
+
+### `OPENROUTER_API_KEY`
+
+| | |
+|---|---|
+| **Default** | _(empty)_ |
+| **Required** | Only when `WORKER_MODE=openrouter` |
+
+Your OpenRouter secret key. When `WORKER_MODE=simulado` this variable can be left empty. When `WORKER_MODE=openrouter` it must contain a valid key or the worker will fail at startup.
+
+---
+
+## API service
+
+### `DATABASE_URL`
+
+| | |
+|---|---|
+| **Default** | _(constructed automatically by compose)_ |
+| **Required** | No — do not set manually |
+
+The `api` service receives this variable pre-constructed by Docker Compose using the PostgreSQL variables above:
+
+```
+postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+```
+
+The `worker` service receives a similar URL using the `postgresql://` scheme (synchronous psycopg driver). Both URLs resolve `postgres` via Docker's internal DNS — this hostname is only valid inside the Docker network and must not be used from outside the containers.
+
+---
+
+## Gemini (standalone test script)
+
+These variables are only read by `infrastructure/gemini/probar_gemini.py` — an independent connectivity test for the Google Gemini API. They are **not** consumed by the main `docker-compose.yml` stack and live in a separate `infrastructure/gemini/.env` file (copied from `infrastructure/gemini/.env.example`).
+
+### `GEMINI_API_KEY`
+
+| | |
+|---|---|
+| **Default** | _(none)_ |
+| **Required** | Yes, for the Gemini test script |
+
+A private API key from [Google AI Studio](https://aistudio.google.com). Treat this the same as any other secret — never commit it, never pass it as a command-line argument, and never include it in logs or screenshots. The test script transmits it only via the HTTPS `x-goog-api-key` header.
+
+### `GEMINI_MODEL`
+
+| | |
+|---|---|
+| **Default** | `gemini-3.5-flash` |
+| **Required** | No |
+
+The primary Gemini model to call. Verified working on 2026-09-24 with the free tier. Confirm current availability and quota limits in AI Studio before running batch workloads.
+
+### `GEMINI_FALLBACK_MODEL`
+
+| | |
+|---|---|
+| **Default** | `gemini-3.1-flash-lite` |
+| **Required** | No |
+
+A fallback model used when the primary model returns a 503 or is rate-limited. The fallback is invoked manually in the test script — there is no automatic retry or failover logic in the current worker implementation.
+
+---
+
+<Warning>
+Never commit `.env` to Git. Only `.env.example` (with no real secrets) belongs in version control. If a secret is accidentally committed, rotate it immediately and rewrite history with `git filter-repo` or contact your Git host's support team.
+</Warning>
+
+<Note>
+`WORKER_MODE` has no implicit default in `docker-compose.yml`. The compose file uses `${WORKER_MODE:?...}` mandatory substitution — the stack will refuse to start if this variable is missing. You must explicitly set either `simulado` or `openrouter` in your `.env` file.
+</Note>

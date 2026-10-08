@@ -1,0 +1,198 @@
+---
+title: "LangGraph processing pipeline: four content routing paths"
+sidebarTitle: "Pipeline"
+description: "The CommunityLab pipeline uses a compiled LangGraph StateGraph to classify messages, score relevance, route to content generators, and consolidate output with full error isolation."
+---
+
+The CommunityLab pipeline is a compiled LangGraph `StateGraph` that turns a batch of ingested messages into distributable content assets and internal alerts. Orchestration is fully deterministic — the graph decides routing based on boolean signals and numeric thresholds, never on probabilistic graph edges. AI components (classifier, scorer, generators) are injected explicitly via a `Componentes` dataclass, keeping the graph reusable and testable with simulated fixtures. Every node is wrapped in an error guard so a single failing component cannot corrupt the output of other routes. The graph supports four distinct content routing paths: achievement posts, FAQ/tip cards, community highlights, and internal blocker alerts.
+
+## Graph nodes
+
+The `StateGraph` is built by `construir_grafo()` and compiled once per worker process. Nodes execute in the order shown below; conditional edges allow the graph to short-circuit to `consolidacion` at any point if an error is detected.
+
+1. **`inicializar`** — Resets all state keys (`lote`, `fuentes`, `analisis`, `puntuaciones`, `enrutamiento`, `pendientes`, `actual`, `borradores`, `alertas`, `errores`, `traza`) to empty values. This allows the same compiled graph instance to be invoked multiple times without carrying over results from previous batches.
+
+2. **`ingesta`** — Calls `validar_lote()` on `estado["entrada"]`. Validates that every message has non-empty `id`, `autor`, `canal`, `fecha`, and `texto`; raises `ContratoInvalido` on duplicates (deduplication must happen before this node). Builds `fuentes` — a dict mapping `id → message dict` — which downstream nodes use to look up source messages by ID.
+
+3. **`analizar`** — Calls the injected `componentes.analizar()` function with a deep copy of `lote`. Validates the returned dict with `validar_analisis()`: every input message ID must have exactly one entry; each entry must contain boolean `es_logro`, `es_duda`, `es_bloqueo`, and a string `tema` (non-empty when `es_duda=True`).
+
+4. **`puntuar`** — Calls the injected `componentes.puntuar()` with `{lote, analisis}`. Validates the returned dict with `validar_puntuaciones()`: every input ID must have exactly one entry; each score must be a finite `float` between `0.0` and `1.0` inclusive.
+
+5. **`router`** — Calls `enrutar_lote()` from `router_base.py`. Merges the `analisis` and `puntuaciones` dicts into each message before passing the enriched lote to the router. The result is stored as `enrutamiento` (the full routing report) and `pendientes` (the ordered list of routing decisions to dispatch).
+
+6. **`despachar`** — Pops the first item from `pendientes` into `actual`, leaving the rest in `pendientes`. This sequential dispatch pattern means content generators are called one decision at a time, preventing concurrent state mutations in the `borradores` list.
+
+7. **Content generators** (conditional, one per decision):
+   - `generador_post_linkedin_x` — calls `componentes.generar_post()`
+   - `generador_faq_tip` — calls `componentes.generar_faq()`
+   - `generador_highlights` — calls `componentes.generar_highlights()`
+   - `alerta_interna` — does not call an AI component; constructs a fixed alert dict with `visibilidad: "interna"`
+
+   Each generator receives only the subset of source messages relevant to its decision — never the full batch. The generator must return exactly `{copy, fuentes}` where `fuentes` matches the input source IDs; any deviation raises `ContratoInvalido`.
+
+8. **`consolidacion`** — Merges `borradores` and `alertas` into the final output object. If `errores` is non-empty, both lists are cleared (no partial output is published). Builds the `fuentes` list by collecting referenced source IDs from all assets and alerts. This node always runs last and produces the `salida` dict returned by `ejecutar_lote()`.
+
+## Routing rules
+
+<Tabs>
+  <Tab title="logro (Achievement)">
+    **Trigger conditions:**
+    - `es_logro = True`
+    - `relevancia ≥ 0.6` (configurable via `Configuracion.relevancia_minima`)
+    - Message not already assigned to a `bloqueo` or `dudas` route
+
+    **Destination node:** `generador_post_linkedin_x`
+
+    **Output format:** `post_linkedin_x`
+
+    **Visibility:** `borrador` (enters the curation workflow)
+
+    One asset is generated per eligible achievement message. The router's precedence order is: `bloqueo > dudas recurrente > logro`, so a message flagged as both a logro and a duda goes to the FAQ route when the duda threshold is met.
+  </Tab>
+  <Tab title="dudas (Recurring FAQ)">
+    **Trigger conditions:**
+    - `es_duda = True`
+    - `relevancia ≥ 0.6`
+    - At least `2` distinct authors (after Unicode normalization and case-folding) raised a question on the **same `tema`**
+
+    **Destination node:** `generador_faq_tip`
+
+    **Output format:** `faq_tip_tecnico`
+
+    **Visibility:** `borrador`
+
+    All messages in the same-`tema` group are bundled into a single FAQ asset. The `autores_minimos_duda` threshold (default `2`) is configurable in `Configuracion`. A single-author duda that doesn't reach the threshold is recorded in `sin_ruta` with the reason `"Duda sin recurrencia suficiente y sin otra ruta aplicable."`.
+  </Tab>
+  <Tab title="bloqueo (Internal Alert)">
+    **Trigger conditions:**
+    - `es_bloqueo = True`
+
+    **Destination node:** `alerta_interna`
+
+    **Visibility:** `interna` — **never published or entered into the curation workflow**
+
+    Blocker messages are routed unconditionally regardless of their relevance score. No AI content is generated; the node constructs a fixed alert object: `{id_alerta, nivel: "revision", mensaje: "Bloqueo detectado; requiere revisión interna.", fuente, visibilidad: "interna"}`. The `id_alerta` is a deterministic SHA-256 derived from `origen_comunidad`, `periodo_referencia`, `ruta`, and `fuentes`.
+  </Tab>
+  <Tab title="periodo (Period Highlights)">
+    **Trigger conditions:**
+    - `cierre_periodo = True` in the batch envelope
+    - At least one eligible (non-blocker, relevance ≥ threshold) message exists
+
+    **Destination node:** `generador_highlights`
+
+    **Output format:** `community_highlights`
+
+    **Visibility:** `borrador`
+
+    This route is an aggregation over the entire set of eligible messages for the period — all of them are passed as `fuentes` in a single generation request. It fires independently of logro/dudas routing, so the same messages can appear in both a `post_linkedin_x` asset and the `community_highlights` summary.
+  </Tab>
+</Tabs>
+
+## Component injection
+
+AI components are passed as a frozen `Componentes` dataclass. No default implementations are assumed; the caller must supply all five callables explicitly.
+
+```python
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass(frozen=True)
+class Componentes:
+    analizar:            Callable[[dict], dict]   # {lote} → {id: {es_logro, es_duda, es_bloqueo, tema}}
+    puntuar:             Callable[[dict], dict]   # {lote, analisis} → {id: float 0–1}
+    generar_post:        Callable[[dict], dict]   # peticion → {copy, fuentes}
+    generar_faq:         Callable[[dict], dict]   # peticion → {copy, fuentes}
+    generar_highlights:  Callable[[dict], dict]   # peticion → {copy, fuentes}
+    simulado:            bool                     # must be an exact bool, not truthy
+```
+
+Use `crear_componentes()` to build the default production or simulated set, then pass it to `ejecutar_lote()`:
+
+```python
+from pipelines.communitylab.grafo import ejecutar_lote, preparar_entrada
+from pipelines.communitylab.componentes import crear_componentes
+
+entrada = preparar_entrada(
+    interacciones,                     # list[Interaccion] from the ingestion layer
+    origen_comunidad="discord_comunidad_alura",
+    periodo_referencia="2026-W23",
+    cierre_periodo=False,
+)
+
+componentes = crear_componentes(simulado=False)   # or simulado=True for local testing
+
+salida = ejecutar_lote(entrada, componentes)
+```
+
+## Simulated mode
+
+When the environment variable `WORKER_MODE=simulado` is set (or `crear_componentes(simulado=True)` is called), the pipeline uses pre-built signal fixtures from `senales_simuladas.json` instead of making live AI calls. All generated assets are automatically prefixed with `[SIMULADO] — NO PUBLICAR` in their `copy` field, and the output object carries `"simulado": true`. This mode is safe for CI, demos, and integration tests.
+
+## Error isolation
+
+Every node function is wrapped in `protegido()`, a closure that catches all exceptions and converts them into a structured error entry:
+
+```python
+{"nodo": "<node_name>", "codigo": "fallo_de_nodo", "tipo": "<ExceptionClassName>"}
+```
+
+Exception messages are intentionally **not** recorded — they may contain credentials, PII, or private prompt content. After any node error, the graph's conditional edges route directly to `consolidacion`, which discards all `borradores` and `alertas` accumulated so far and sets `estado: "error"`. This guarantees that no partial or inconsistent output ever reaches the curation layer.
+
+## Output contract
+
+<Expandable title="consolidacion output schema">
+
+The `salida` dict returned by `ejecutar_lote()` always conforms to this shape:
+
+```json
+{
+  "version_contrato": "grafo-local-v1-provisional",
+  "estado": "completado_local",
+  "simulado": false,
+  "origen_comunidad": "discord_comunidad_alura",
+  "periodo_referencia": "2026-W23",
+  "activos_distribucion_generados": [
+    {
+      "id_activo": "activo-a3f9e1c2b8d47012ef56",
+      "formato": "post_linkedin_x",
+      "copy": "¡Orgullo en la comunidad! ...",
+      "fuentes": ["msg-001"],
+      "estado": "borrador",
+      "simulado": false
+    }
+  ],
+  "alertas_internas": [
+    {
+      "id_alerta": "alerta-7b2c3d4e5f6a7b8c9d0e",
+      "nivel": "revision",
+      "mensaje": "Bloqueo detectado; requiere revisión interna.",
+      "fuente": "msg-003",
+      "visibilidad": "interna"
+    }
+  ],
+  "fuentes": [
+    {"id": "msg-001", "autor": "ana_dev", "canal": "#logros", "fecha": "2026-06-01T10:00:00+00:00"},
+    {"id": "msg-003", "autor": "lucia_ml", "canal": "#bloqueos", "fecha": "2026-06-01T12:00:00+00:00"}
+  ],
+  "errores": [],
+  "almacenamiento": {"proveedor": "pendiente", "estado": "no_persistido"},
+  "traza": ["inicializar", "ingesta", "analizar", "puntuar", "router", "despachar", "generador_post_linkedin_x", "despachar", "alerta_interna", "despachar", "consolidacion"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version_contrato` | string | Always `"grafo-local-v1-provisional"` |
+| `estado` | string | `"completado_local"` on success, `"error"` if any node failed |
+| `simulado` | boolean | Mirrors `Componentes.simulado` |
+| `activos_distribucion_generados` | array | Content assets ready for curation; empty on error |
+| `alertas_internas` | array | Internal blocker alerts; empty on error |
+| `fuentes` | array | Subset of source messages referenced by assets or alerts (`id`, `autor`, `canal`, `fecha` only) |
+| `errores` | array | List of `{nodo, codigo, tipo}` objects; empty on success |
+| `traza` | array | Ordered list of node names that executed |
+
+</Expandable>
+
+<Note>
+  Asset IDs (`id_activo`) and alert IDs (`id_alerta`) are the first 20 hex characters of a SHA-256 digest computed from `{origen_comunidad, periodo_referencia, ruta, fuentes}`. Because the digest is deterministic, re-running the pipeline with the same batch produces the same IDs — safe retry semantics with no duplicate records inserted into the database.
+</Note>

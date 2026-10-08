@@ -1,0 +1,258 @@
+---
+title: "Ingestion endpoints: POST /api/v1/procesamientos"
+sidebarTitle: "Ingestion"
+description: "Submit a batch of community messages for synchronous mock processing or file-based upload. Returns generated assets, internal alerts, and OCI storage metadata."
+---
+
+The `Procesamientos` router provides two synchronous ingestion endpoints. The first accepts a structured JSON body and returns a fully mocked `IngestaResponse` immediately — no database writes occur, making it ideal for integration tests and frontend development against a stable fixture. The second accepts a multipart file upload (JSON, JSONL, or CSV), runs real parsing and heuristic relevance scoring on each message, and returns an `IngestaResponse` whose asset list is empty because content generation happens asynchronously inside the worker pipeline.
+
+---
+
+## POST /api/v1/procesamientos
+
+Accepts a JSON batch and returns a mock `IngestaResponse` synchronously. No database interaction is performed; all response values are deterministic fixtures that reflect a realistic shape of the real async response.
+
+### Request body
+
+<ParamField body="origen_comunidad" type="string" required>
+  Identifier for the community source (e.g. a Discord server slug). Example: `"discord_comunidad_alura"`.
+</ParamField>
+
+<ParamField body="periodo_referencia" type="string" required>
+  ISO week or period label the batch covers. Example: `"2026-W38"`.
+</ParamField>
+
+<ParamField body="interacciones" type="array" required>
+  List of community interaction objects to process. Each element must contain:
+
+  <Expandable title="Interaccion fields">
+    <ParamField body="id" type="string" required>
+      Unique identifier for this message within the batch.
+    </ParamField>
+    <ParamField body="autor" type="string" required>
+      Display name of the message author. Max 150 characters.
+    </ParamField>
+    <ParamField body="canal" type="string" required>
+      Channel name where the message was posted. Max 50 characters.
+    </ParamField>
+    <ParamField body="tipo" type="string" required>
+      Message category (e.g. `"logro"`, `"pregunta"`, `"bloqueo"`). Max 50 characters.
+    </ParamField>
+    <ParamField body="fecha" type="string" required>
+      ISO 8601 datetime string of when the message was sent.
+    </ParamField>
+    <ParamField body="texto" type="string" required>
+      Full text content of the message.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example request
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/procesamientos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "origen_comunidad": "discord_comunidad_alura",
+    "periodo_referencia": "2026-W38",
+    "interacciones": [
+      {
+        "id": "m-01",
+        "autor": "sofia_dev",
+        "canal": "logros",
+        "tipo": "logro",
+        "fecha": "2026-09-15T10:30:00Z",
+        "texto": "¡Conseguí mi primer empleo Dev Jr. gracias al portafolio de IA que armé aquí!"
+      },
+      {
+        "id": "m-02",
+        "autor": "carlos_ml",
+        "canal": "dudas-tecnicas",
+        "tipo": "pregunta",
+        "fecha": "2026-09-16T14:00:00Z",
+        "texto": "¿Cómo manejan los reintentos en LangGraph cuando un nodo falla?"
+      },
+      {
+        "id": "m-03",
+        "autor": "ana_backend",
+        "canal": "dudas-tecnicas",
+        "tipo": "respuesta",
+        "fecha": "2026-09-16T14:45:00Z",
+        "texto": "Configura una condición de fallback en el router y limita los reintentos con max_attempts."
+      }
+    ]
+  }'
+```
+
+### Response `200 OK`
+
+<ResponseField name="procesamiento_id" type="string">
+  Unique identifier assigned to this processing batch (mock value: `"proc-mock-2026-001"`).
+</ResponseField>
+
+<ResponseField name="resumen_comunidad" type="string">
+  Human-readable summary of how many interactions were processed and for which period.
+</ResponseField>
+
+<ResponseField name="activos_distribucion_generados" type="array">
+  Generated content assets ready for the curation workflow.
+
+  <Expandable title="ActivoGenerado fields">
+    <ResponseField name="id_activo" type="string">
+      Unique identifier for the asset (e.g. `"act-01"`).
+    </ResponseField>
+    <ResponseField name="formato" type="string">
+      Content format: `linkedin`, `faq`, or `newsletter`.
+    </ResponseField>
+    <ResponseField name="copy" type="string">
+      Full generated copy text for the asset.
+    </ResponseField>
+    <ResponseField name="fuentes" type="array of strings">
+      List of source message IDs (`id`) that informed this asset.
+    </ResponseField>
+    <ResponseField name="estado" type="string">
+      Initial curation state — always `"generado"` on creation.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="alertas_internas" type="array">
+  Internal alerts flagged during processing.
+
+  <Expandable title="AlertaInterna fields">
+    <ResponseField name="id_alerta" type="string">
+      Unique alert identifier.
+    </ResponseField>
+    <ResponseField name="nivel" type="string">
+      Severity level (e.g. `"bloqueo"`, `"aviso"`).
+    </ResponseField>
+    <ResponseField name="mensaje" type="string">
+      Human-readable description of the alert.
+    </ResponseField>
+    <ResponseField name="fuente" type="string">
+      ID of the source message that triggered this alert.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="almacenamiento_oci" type="object">
+  Metadata for the OCI Object Storage destination.
+
+  <Expandable title="AlmacenamientoOCI fields">
+    <ResponseField name="bucket" type="string">
+      Target OCI bucket name (e.g. `"communitylab-alwaysfree-bucket"`).
+    </ResponseField>
+    <ResponseField name="ruta" type="string">
+      Object path inside the bucket for this batch's output package.
+    </ResponseField>
+    <ResponseField name="estado" type="string">
+      Storage status — `"simulado_pendiente_worker"` in mock mode until the async worker uploads the file.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "procesamiento_id": "proc-mock-2026-001",
+  "resumen_comunidad": "Procesadas 3 interacciones para el período 2026-W38.",
+  "activos_distribucion_generados": [
+    {
+      "id_activo": "act-01",
+      "formato": "linkedin",
+      "copy": "¡Orgullo en la comunidad! Uno de nuestros miembros consiguió su primer empleo Dev Jr. tras mostrar su portafolio de IA. #CommunityHighlights",
+      "fuentes": ["m-01"],
+      "estado": "generado"
+    },
+    {
+      "id_activo": "act-02",
+      "formato": "faq",
+      "copy": "FAQ Técnico: ¿Cómo manejar reintentos en LangGraph? Configura una condición de fallback y limita reintentos en el router.",
+      "fuentes": ["m-02", "m-03"],
+      "estado": "generado"
+    },
+    {
+      "id_activo": "act-03",
+      "formato": "newsletter",
+      "copy": "Resumen semanal: Gran mentoría sobre portafolios de IA y resolución de dudas sobre OCI Storage.",
+      "fuentes": ["m-04", "m-05"],
+      "estado": "generado"
+    }
+  ],
+  "alertas_internas": [
+    {
+      "id_alerta": "alt-01",
+      "nivel": "bloqueo",
+      "mensaje": "Usuario reportó timeout 504 intermitente al intentar acceder al bucket de OCI.",
+      "fuente": "m-06"
+    }
+  ],
+  "almacenamiento_oci": {
+    "bucket": "communitylab-alwaysfree-bucket",
+    "ruta": "demo/2026-W38/lotes/proc-mock-2026-001/paquete.json",
+    "estado": "simulado_pendiente_worker"
+  }
+}
+```
+
+---
+
+## POST /api/v1/procesamientos/upload
+
+Accepts a multipart file upload containing community messages and runs real parsing plus heuristic relevance scoring on each record. Unlike the JSON endpoint, this path calls the actual `procesar_lote` and `evaluar_interaccion` services. Asset generation does **not** happen here — the `activos_distribucion_generados` array will always be empty; content creation occurs later in the async worker pipeline.
+
+### Form fields
+
+<ParamField body="file" type="file" required>
+  The message data file. Accepted formats: `.json`, `.jsonl`, `.csv`. The file is parsed according to its extension. A JSON file may contain either an array at the root or an object with an `"interacciones"` key.
+</ParamField>
+
+<ParamField body="origen_comunidad" type="string" required>
+  Community source identifier (e.g. `"discord_comunidad_alura"`).
+</ParamField>
+
+<ParamField body="periodo_referencia" type="string" required>
+  Period label for this batch (e.g. `"2026-W38"`).
+</ParamField>
+
+### Example request
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/procesamientos/upload \
+  -F "file=@mensajes_semana38.json;type=application/json" \
+  -F "origen_comunidad=discord_comunidad_alura" \
+  -F "periodo_referencia=2026-W38"
+```
+
+### Response `200 OK`
+
+Same schema as the JSON endpoint above. Key differences in this response:
+
+- `activos_distribucion_generados` is always `[]` — asset generation runs in the async worker
+- `alertas_internas` is always `[]`
+- `resumen_comunidad` includes a count of highlighted (`destacados`) and rejected (`rechazadas`) records
+- `almacenamiento_oci.estado` is `"simulado_pendiente_worker"`
+
+### Example response
+
+```json
+{
+  "procesamiento_id": "proc-upload-local",
+  "resumen_comunidad": "Procesadas 42 interacciones para el período 2026-W38. Destacadas: 8. Rechazadas: 1.",
+  "activos_distribucion_generados": [],
+  "alertas_internas": [],
+  "almacenamiento_oci": {
+    "bucket": "communitylab-alwaysfree-bucket",
+    "ruta": "demo/2026-W38/lotes/proc-upload-local/paquete.json",
+    "estado": "simulado_pendiente_worker"
+  }
+}
+```
+
+### Error codes
+
+| Status | Condition |
+|---|---|
+| `400` | File format is not JSON, JSONL, or CSV; or the file content could not be parsed |
+| `422` | Pydantic validation error — one or more `Interaccion` fields failed length or type constraints |

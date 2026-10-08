@@ -1,0 +1,215 @@
+---
+title: "OpenRouter LLM integration for CommunityLab AI nodes"
+sidebarTitle: "OpenRouter"
+description: "Configure OpenRouter as the LLM backend for CommunityLab's classification, scoring, and content generation nodes. Set WORKER_MODE=openrouter and provide an API key."
+---
+
+OpenRouter is the active LLM integration used by CommunityLab's worker when `WORKER_MODE=openrouter`. It powers all five AI node functions — `analizar_real`, `puntuar_real`, `post_real`, `faq_real`, and `highlights_real` — defined in `backend/app/pipelines/agent_nodes.py`. Each node builds a prompt, calls the shared `llamar_llm_openrouter` helper, and returns a validated Python dictionary that the LangGraph pipeline passes to the next node. OpenRouter's model-routing layer means you can swap the underlying model by changing a single configuration value without touching node code.
+
+## Configuration
+
+Set the following two variables in your `.env` file (or export them in your shell):
+
+```ini
+# .env
+WORKER_MODE=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+`WORKER_MODE` controls which pipeline components the worker loads at startup. When set to `openrouter`, the worker imports the five real node functions from `backend/app/pipelines/agent_nodes.py` and requires `OPENROUTER_API_KEY` to be non-empty. If the key is absent, the worker raises `ValueError("Falta configurar OpenRouter")` before accepting any jobs.
+
+## AI Nodes
+
+Each node is a plain Python function. They are composed into a LangGraph graph by `Componentes` in `pipelines/communitylab`. The graph runs nodes in sequence: classify → score → generate content → consolidate.
+
+<AccordionGroup>
+  <Accordion title="analizar_real(lote) — Message Classification">
+    Classifies every message in a batch by type and topic.
+
+    **Input** — a `lote` dict with an `interacciones` list:
+    ```python
+    {
+        "interacciones": [
+            {"id": "m-01", "texto": "Conseguí mi primer empleo!"},
+            {"id": "m-02", "texto": "No entiendo cómo funciona async/await"}
+        ]
+    }
+    ```
+
+    **Prompt sent to OpenRouter** — a `[{id, texto}]` list with the instruction to return a strict JSON object:
+    ```json
+    {
+        "resultados": [
+            {
+                "id": "m-01",
+                "es_logro": true,
+                "es_duda": false,
+                "es_bloqueo": false,
+                "tema": "Empleo"
+            }
+        ]
+    }
+    ```
+
+    **Output** — a dict keyed by message ID:
+    ```python
+    {
+        "m-01": {"es_logro": True, "es_duda": False, "es_bloqueo": False, "tema": "Empleo"},
+        "m-02": {"es_logro": False, "es_duda": True,  "es_bloqueo": False, "tema": "Python"}
+    }
+    ```
+
+    All three boolean fields are validated to be actual `bool` values. The function raises `ValueError` if the LLM returns an ID that was not in the original batch, a duplicate ID, or a non-boolean flag.
+  </Accordion>
+
+  <Accordion title="puntuar_real(peticion) — Relevance Scoring">
+    Scores each message with a relevance float between `0.0` and `1.0`. Messages that score above `0.60` are forwarded to the content generation nodes.
+
+    **Input** — a `peticion` dict containing `lote` (same shape as `analizar_real` input) and `analisis` (output from `analizar_real`):
+    ```python
+    {
+        "lote": {"interacciones": [{"id": "m-01", "texto": "..."}]},
+        "analisis": {"m-01": {"es_logro": True, ...}}
+    }
+    ```
+
+    **Prompt sent to OpenRouter** — instructs the model to assign `> 0.60` only to highly useful messages, milestones, or serious blockers. Expected JSON response:
+    ```json
+    {
+        "resultados": [
+            {"id": "m-01", "relevancia": 0.92}
+        ]
+    }
+    ```
+
+    **Output** — a dict keyed by message ID mapping to a float:
+    ```python
+    {"m-01": 0.92, "m-02": 0.35}
+    ```
+
+    The function validates that every score is a `float` in `[0.0, 1.0]` and that the returned set of IDs exactly matches the input batch.
+  </Accordion>
+
+  <Accordion title="post_real(peticion) — LinkedIn Copy Generator">
+    Generates an inspirational LinkedIn post in Spanish based on the selected high-relevance messages.
+
+    **Input** — a `peticion` dict with `interacciones` (or `interacciones_seleccionadas`) and an optional `fuentes` list:
+    ```python
+    {
+        "interacciones": [{"id": "m-01", "texto": "Conseguí mi primer empleo!"}],
+        "fuentes": ["m-01"]
+    }
+    ```
+
+    **Prompt sent to OpenRouter**: creates an inspiring LinkedIn post in Spanish from the provided messages; expects a JSON response with a `copy` key.
+
+    **Output**:
+    ```python
+    {
+        "copy": "🚀 ¡Celebramos un nuevo logro en la comunidad! ...",
+        "fuentes": ["m-01"]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="faq_real(peticion) — FAQ / Educational Tip Generator">
+    Generates a technical FAQ or educational tip in Spanish targeted at the community's questions and doubts.
+
+    **Input** — same shape as `post_real`:
+    ```python
+    {
+        "interacciones": [{"id": "m-02", "texto": "No entiendo cómo funciona async/await"}],
+        "fuentes": ["m-02"]
+    }
+    ```
+
+    **Prompt sent to OpenRouter**: creates a technical FAQ or educational tip in Spanish that resolves the submitted doubts; expects a JSON response with a `copy` key.
+
+    **Output**:
+    ```python
+    {
+        "copy": "💡 FAQ: ¿Cómo funciona async/await en Python? ...",
+        "fuentes": ["m-02"]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="highlights_real(peticion) — Community Newsletter Generator">
+    Generates a cohesive weekly community summary (Community Highlights) in Spanish from the week's most relevant interactions.
+
+    **Input** — same shape as `post_real` and `faq_real`:
+    ```python
+    {
+        "interacciones": [
+            {"id": "m-01", "texto": "Conseguí mi primer empleo!"},
+            {"id": "m-03", "texto": "Lanzamos el MVP esta semana"}
+        ],
+        "fuentes": ["m-01", "m-03"]
+    }
+    ```
+
+    **Prompt sent to OpenRouter**: drafts a weekly community summary (Community Highlights) in Spanish covering the provided events; expects a JSON response with a `copy` key.
+
+    **Output**:
+    ```python
+    {
+        "copy": "🗓️ Highlights de la semana: Esta semana la comunidad ...",
+        "fuentes": ["m-01", "m-03"]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Model Selection
+
+All calls use the `"openrouter/free"` model identifier:
+
+```python
+payload = {
+    "models": ["openrouter/free"],
+    "messages": [{"role": "user", "content": prompt}],
+    "response_format": {"type": "json_object"},
+}
+```
+
+`openrouter/free` routes each request to the cheapest available free model on OpenRouter's network at the time of the call. This is suitable for development and low-volume deployments. For production use, replace `"openrouter/free"` with a specific model ID (e.g. `"google/gemini-flash-1.5"` or `"meta-llama/llama-3.1-8b-instruct:free"`) to get deterministic behavior and stable latency.
+
+## Response Format
+
+Every call to `llamar_llm_openrouter` enforces `"response_format": {"type": "json_object"}`, which instructs supported models to return only valid JSON. The helper also strips any residual Markdown fences (` ```json ` / ` ``` `) before parsing, so the returned value is always a Python `dict`.
+
+## Error Handling
+
+`llamar_llm_openrouter` raises `ValueError("Respuesta de OpenRouter no disponible o inválida")` in any of these conditions:
+
+- `OPENROUTER_API_KEY` is not set
+- The HTTP request fails or returns a non-2xx status code
+- The response body cannot be parsed as JSON
+- The parsed response is not a `dict` or has no `choices` field
+- The `choices[0].message.content` value cannot be decoded as JSON
+
+The LangGraph graph wraps each node call in a `protegido()` decorator that catches `ValueError` and routes the pipeline directly to the consolidation node with `estado: "error"`, preventing a crash from blocking the job queue.
+
+## Test a Node Directly
+
+You can call any node function in isolation from a Python REPL or script without starting the full worker:
+
+```python
+import os
+
+os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-..."
+
+from backend.app.pipelines.agent_nodes import analizar_real
+
+result = analizar_real({
+    "interacciones": [
+        {"id": "m-01", "texto": "Conseguí mi primer empleo!"}
+    ]
+})
+print(result)
+# {"m-01": {"es_logro": True, "es_duda": False, "es_bloqueo": False, "tema": "Empleo"}}
+```
+
+<Tip>
+  To develop and test the pipeline without making any API calls, set `WORKER_MODE=simulado` in your `.env`. In simulated mode, the worker uses pre-defined signal fixtures — relevance scores are hardcoded to `0.8` and classification flags are derived from each message's `tipo` field. OpenRouter is never contacted, so no API key is required and no quota is consumed.
+</Tip>

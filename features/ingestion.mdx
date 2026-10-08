@@ -1,0 +1,195 @@
+---
+title: "Batch ingestion: validate, normalize, and deduplicate messages"
+sidebarTitle: "Ingestion"
+description: "Upload JSON, JSONL, or CSV files of Discord messages. CommunityLab validates fields, normalizes types, and deduplicates by message ID before storing in PostgreSQL."
+---
+
+The ingestion module is the entry point for all community data in CommunityLab. Every message that flows through the pipeline — whether it becomes a LinkedIn post, an FAQ, or an internal alert — begins here. The module accepts batch uploads in three file formats, normalizes field types and whitespace, rejects records that are missing required fields, and deduplicates the entire batch by message ID before handing a clean list of `Interaccion` objects to downstream stages.
+
+## Supported formats
+
+| Format | File Extension | Notes |
+|--------|---------------|-------|
+| JSON | `.json` | Object with an `interacciones` key (list value), or a bare JSON array |
+| JSONL | `.jsonl` | One JSON object per line; blank lines are skipped |
+| CSV | `.csv` | Parsed with `csv.DictReader`; column names are auto-detected from the header row |
+
+## Required message fields
+
+<ParamField body="id" type="string" required>
+  Unique message identifier. Falls back to `id_mensaje` if `id` is absent. Empty strings are rejected.
+</ParamField>
+
+<ParamField body="autor" type="string" required>
+  Display name of the message author. Maximum 150 characters. Empty strings are rejected.
+</ParamField>
+
+<ParamField body="canal" type="string" required>
+  Discord channel name (e.g. `#dudas-tecnicas`, `#logros`). Maximum 50 characters.
+</ParamField>
+
+<ParamField body="fecha" type="string" required>
+  ISO 8601 datetime string (e.g. `2023-02-07T15:48:02.516853+00:00`). Leading and trailing whitespace is trimmed.
+</ParamField>
+
+<ParamField body="texto" type="string" required>
+  Full text content of the message. Empty strings are rejected.
+</ParamField>
+
+<ParamField body="tipo" type="string">
+  Message type hint (e.g. `logro`, `duda`, `bloqueo`, `pregunta_tecnica`). Maximum 50 characters. Defaults to `"mensaje"` when absent. Used as a routing hint; does not replace the pipeline's classifier signals.
+</ParamField>
+
+## Processing steps
+
+<Steps>
+  <Step title="Parse file">
+    The uploaded file is read in full and decoded as UTF-8 (BOM-tolerant). The parser branches on file extension:
+
+    - **`.json`** — `json.loads()` the entire body. If the root value is an object, the `interacciones` key is extracted. A bare array is accepted directly.
+    - **`.jsonl`** — each non-empty line is parsed independently with `json.loads()`.
+    - **`.csv`** — `csv.DictReader` infers column names from the header row; each row becomes a `dict`.
+
+    Any file that cannot be decoded or parsed returns HTTP 400 with a descriptive error.
+  </Step>
+
+  <Step title="Normalize each record">
+    Each raw dict is passed through `normalize_interaccion()`:
+
+    ```python
+    id_val  = str(raw.get('id', raw.get('id_mensaje', ''))).strip()
+    autor   = str(raw.get('autor', '')).strip()
+    canal   = str(raw.get('canal', '')).strip()
+    fecha   = str(raw.get('fecha', '')).strip()
+    texto   = str(raw.get('texto', '')).strip()
+    tipo    = str(raw.get('tipo', 'mensaje')).strip()
+    ```
+
+    Key normalization rules:
+    - `id` falls back to `id_mensaje` for compatibility with the reference dataset.
+    - All string fields are cast with `str()` before stripping — safe against numeric CSV values.
+    - Empty strings after stripping are treated as missing.
+  </Step>
+
+  <Step title="Validate required fields">
+    After normalization, records where `id`, `autor`, or `texto` are empty strings raise a `ValueError` and are counted as `rechazadas` (rejected). The rejection count is surfaced in `resumen_comunidad` of the response:
+
+    ```
+    Procesadas 42 interacciones para el período 2026-W38.
+    Destacadas: 5. Rechazadas: 3.
+    ```
+
+    Rejected records are silently skipped; they do not abort the batch.
+  </Step>
+
+  <Step title="Deduplicate">
+    `deduplicate()` iterates the validated list and keeps only the **first occurrence** of each `id`. Subsequent records with the same ID are dropped. This ensures downstream graph nodes never receive duplicate IDs, which would violate the pipeline contract.
+
+    ```python
+    vistos = set()
+    unicas = []
+    for interaccion in interacciones:
+        if interaccion.id not in vistos:
+            vistos.add(interaccion.id)
+            unicas.append(interaccion)
+    ```
+  </Step>
+
+  <Step title="Enqueue or process immediately">
+    The cleaned list is either:
+
+    - **Enqueued** — sent to `POST /api/v1/trabajos` (async path via `ColaPostgres.encolar`), which returns HTTP 202 and a `procesamiento_id` for polling.
+    - **Processed immediately** — submitted to `POST /api/v1/procesamientos/upload` for synchronous relevance scoring in the same request.
+
+    Both paths accept the same normalized `Interaccion` objects. The async path is recommended for batches larger than a few dozen messages.
+  </Step>
+</Steps>
+
+## File size and batch limits
+
+| Limit | Value | Enforced in |
+|-------|-------|-------------|
+| Maximum file size | 5 MiB | `encolar_archivo()` in `trabajos.py` |
+| Maximum interactions per job | 500 | `LoteTrabajo.interacciones` field (`max_length=500`) |
+
+Uploads exceeding 5 MiB receive HTTP 413. Batches with more than 500 interactions after deduplication receive HTTP 422.
+
+## Example upload
+
+Create a minimal JSON file and upload it with `multipart/form-data`:
+
+```json title="lote_prueba.json"
+{
+  "interacciones": [
+    {
+      "id": "msg-001",
+      "autor": "ana_dev",
+      "canal": "#logros",
+      "fecha": "2026-06-01T10:00:00+00:00",
+      "texto": "¡Conseguí mi primer empleo como Dev Jr.! Gracias a todos 🚀",
+      "tipo": "logro"
+    },
+    {
+      "id": "msg-002",
+      "autor": "carlos_qa",
+      "canal": "#dudas-tecnicas",
+      "fecha": "2026-06-01T11:30:00+00:00",
+      "texto": "¿Cómo configuro reintentos en LangGraph? No me funciona el fallback.",
+      "tipo": "duda"
+    },
+    {
+      "id": "msg-003",
+      "autor": "lucia_ml",
+      "canal": "#bloqueos",
+      "fecha": "2026-06-01T12:00:00+00:00",
+      "texto": "Tengo un error de timeout 504 al conectar con el bucket de OCI.",
+      "tipo": "bloqueo"
+    }
+  ]
+}
+```
+
+```bash title="Upload via /api/mensajes/procesamientos"
+curl -X POST https://your-instance/api/mensajes/procesamientos \
+  -F "file=@lote_prueba.json;type=application/json" \
+  -F "origen_comunidad=discord_comunidad_alura" \
+  -F "periodo_referencia=2026-W23" \
+  -F "cierre_periodo=false"
+```
+
+```bash title="Async enqueue via /api/v1/trabajos (recommended for large batches)"
+curl -X POST https://your-instance/api/v1/trabajos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "origen_comunidad": "discord_comunidad_alura",
+    "periodo_referencia": "2026-W23",
+    "cierre_periodo": false,
+    "interacciones": [
+      {
+        "id": "msg-001",
+        "autor": "ana_dev",
+        "canal": "#logros",
+        "fecha": "2026-06-01T10:00:00+00:00",
+        "texto": "¡Conseguí mi primer empleo como Dev Jr.! Gracias a todos 🚀",
+        "tipo": "logro"
+      }
+    ]
+  }'
+```
+
+## Relevance scoring
+
+After ingestion, each message is evaluated by the heuristic scorer in `evaluar_texto()`. The scorer checks four independent criteria, each capped at 10 points, for a maximum total of 40. Messages with **total ≥ 12** are flagged `es_destacado: true` and treated as high-priority candidates by the pipeline router.
+
+| Criterion | Keywords (partial list) | Points per match | Cap |
+|-----------|------------------------|-----------------|-----|
+| `hito_logrado` | `conseguí`, `logré`, `primer empleo`, `aprobé`, `certificación`, `terminé`, `portafolio`, `contratado`, `oferta` | +3 | 10 |
+| `emocion` | `feliz`, `orgullos`, `emocionad`, `gracias`, `increíble`, `excelente`, `me encanta`, `❤️`, `🥳`, `🚀` | +2 (+2 bonus for `!`) | 10 |
+| `utilidad` | `tutorial`, `guía`, `solución`, `paso a paso`, `resolví`, `cómo hacer`, `consejo`, `tip`, `repo`, `github.com` | +3 | 10 |
+| `recurrencia` | `cómo`, `duda`, `pregunta`, `error`, `falla`, `ayuda`, `alguien sabe`, `no me funciona`, `issue` | +2 (+3 bonus for `?`/`¿`) | 10 |
+
+The `PuntajeRelevancia` object returned contains all four sub-scores, the total, and the `es_destacado` flag. This object is stored alongside the interaction and surfaced in the pipeline's `puntuar` node.
+
+<Tip>
+  The repository ships with a ready-to-use simulated dataset at `backend/data/interacciones_simuladas_es.json`. It contains real Spanish-language Discord messages across channels like `#dudas-tecnicas` with diverse `tipo` and `sentimiento_ref` values — perfect for end-to-end testing without needing a live Discord export. Use it directly with any upload endpoint by setting `origen_comunidad=discord_comunidad_alura`.
+</Tip>

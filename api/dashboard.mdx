@@ -1,0 +1,84 @@
+---
+title: "Dashboard KPI endpoint: GET /api/dashboard/kpis"
+sidebarTitle: "Dashboard KPIs"
+description: "GET /api/dashboard/kpis returns aggregated community metrics computed with SQL GROUP BY queries in PostgreSQL: message counts, sentiment distribution, asset funnel, and alerts."
+---
+
+The `Dashboard KPIs` router exposes a single endpoint that powers the entire analytics dashboard. Every metric is computed entirely inside PostgreSQL using `COUNT`, `GROUP BY`, and `ILIKE` predicates — no rows are loaded into Python memory, making this endpoint safe and fast at any dataset size. The five KPIs cover message volume, sentiment distribution, the curation asset funnel, and internal alert counts.
+
+---
+
+## GET /api/dashboard/kpis
+
+Returns all aggregated community metrics in a single response. No query parameters are required or accepted.
+
+### Example request
+
+```bash
+curl http://127.0.0.1:8080/api/dashboard/kpis
+```
+
+### Response fields
+
+<ResponseField name="total_mensajes" type="integer">
+  Total `COUNT` of all rows in the `mensajes` table, regardless of channel, type, or processing state. Represents the full volume of community messages ingested to date.
+</ResponseField>
+
+<ResponseField name="distribucion_sentimiento" type="object">
+  Sentiment breakdown computed by `GROUP BY sentimiento_ref` on the `mensajes` table. Rows with a `NULL` or unrecognized sentiment value are counted under `neutral`.
+
+  <Expandable title="distribucion_sentimiento fields">
+    <ResponseField name="positivo" type="integer">
+      Count of messages where `sentimiento_ref = 'positivo'`.
+    </ResponseField>
+    <ResponseField name="negativo" type="integer">
+      Count of messages where `sentimiento_ref = 'negativo'`.
+    </ResponseField>
+    <ResponseField name="neutral" type="integer">
+      Count of messages where `sentimiento_ref = 'neutral'` or the field is `NULL` (unprocessed messages).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="activos_generados" type="integer">
+  Total count of all content assets across all curation states (`generado`, `revisado`, `aprobado`, `rechazado`). Represents the full size of the asset funnel.
+</ResponseField>
+
+<ResponseField name="activos_aprobados" type="integer">
+  Count of assets where `estado = 'aprobado'`. Use this together with `activos_generados` to display funnel conversion rate.
+</ResponseField>
+
+<ResponseField name="alertas_internas" type="integer">
+  Count of messages that match any of the following alert conditions evaluated with a single `WHERE` clause:
+  - `tipo = 'bloqueo'`
+  - `texto ILIKE '%bloqueo%'`
+  - `texto ILIKE '%error%'`
+
+  A single message may match more than one condition but is counted once due to the `OR` predicate.
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "total_mensajes": 1284,
+  "distribucion_sentimiento": {
+    "positivo": 742,
+    "negativo": 89,
+    "neutral": 453
+  },
+  "activos_generados": 86,
+  "activos_aprobados": 34,
+  "alertas_internas": 12
+}
+```
+
+### Error codes
+
+| Status | Condition |
+|---|---|
+| `500` | A PostgreSQL query failed; the response body contains `{"detail": "Error al calcular KPIs: <exception message>"}` |
+
+<Tip>
+  All five metrics are computed in a single database round-trip per KPI query — there are five separate `await db.execute` calls but no Python-side aggregation. If you need to reduce latency at very high load, these could be wrapped in a single SQL `WITH` (CTE) query in a future optimization pass.
+</Tip>
